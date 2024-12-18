@@ -41,18 +41,23 @@
  */
 static mdadm_status_t set_bitmap_value(struct shape *s, struct context *c, char *val)
 {
-	if (s->bitmap_file) {
+	if (s->btype != BitmapUnknown) {
 		pr_err("--bitmap cannot be set twice. Second value: \"%s\".\n", val);
 		return MDADM_STATUS_ERROR;
 	}
 
-	if (strcmp(val, "internal") == 0 || strcmp(optarg, STR_COMMON_NONE) == 0) {
-		s->bitmap_file = val;
+	if (strcmp(optarg, STR_COMMON_NONE) == 0) {
+		s->btype = BitmapNone;
+		return MDADM_STATUS_SUCCESS;
+	}
+
+	if (strcmp(val, "internal") == 0) {
+		s->btype = BitmapInternal;
 		return MDADM_STATUS_SUCCESS;
 	}
 
 	if (strcmp(val, "clustered") == 0) {
-		s->bitmap_file = val;
+		s->btype = BitmapCluster;
 		/* Set the default number of cluster nodes
 		 * to 4 if not already set by user
 		 */
@@ -62,17 +67,12 @@ static mdadm_status_t set_bitmap_value(struct shape *s, struct context *c, char 
 	}
 
 	if (strchr(val, '/')) {
-		pr_info("Custom write-intent bitmap file option is deprecated.\n");
-		if (ask("Do you want to continue? (y/n)")) {
-			s->bitmap_file = val;
-			return MDADM_STATUS_SUCCESS;
-		}
-
+		pr_err("Custom write-intent bitmap file option is not supported.\n");
 		return MDADM_STATUS_ERROR;
 	}
 
-	pr_err("--bitmap value must contain a '/' or be 'internal', 'clustered' or 'none'\n");
-	pr_err("Current value is \"%s\"", val);
+	pr_err("--bitmap value must be 'internal', 'clustered' or 'none'\n");
+	pr_err("Current value is \"%s\"\n", val);
 	return MDADM_STATUS_ERROR;
 }
 
@@ -99,23 +99,12 @@ int main(int argc, char *argv[])
 	struct mddev_ident ident;
 	char *configfile = NULL;
 	int devmode = 0;
-	int bitmap_fd = -1;
 	struct mddev_dev *devlist = NULL;
 	struct mddev_dev **devlistend = & devlist;
 	struct mddev_dev *dv;
 	mdu_array_info_t array;
 	int devs_found = 0;
 	int grow_continue = 0;
-	/* autof indicates whether and how to create device node.
-	 * bottom 3 bits are style.  Rest (when shifted) are number of parts
-	 * 0  - unset
-	 * 1  - don't create (no)
-	 * 2  - if is_standard, then create (yes)
-	 * 3  - create as 'md' - reject is_standard mdp (md)
-	 * 4  - create as 'mdp' - reject is_standard md (mdp)
-	 * 5  - default to md if not is_standard (md in config file)
-	 * 6  - default to mdp if not is_standard (part, or mdp in config file)
-	 */
 	struct context c = {
 		.require_homehost = 1,
 	};
@@ -126,6 +115,7 @@ int main(int argc, char *argv[])
 		.bitmap_chunk	= UnSet,
 		.consistency_policy	= CONSISTENCY_POLICY_UNKNOWN,
 		.data_offset = INVALID_SECTORS,
+		.btype		= BitmapUnknown,
 	};
 
 	char sys_hostname[256];
@@ -139,7 +129,7 @@ int main(int argc, char *argv[])
 	struct supertype *ss = NULL;
 	enum flag_mode writemostly = FlagDefault;
 	enum flag_mode failfast = FlagDefault;
-	char *shortopt = short_options;
+	char *shortopt = short_opts;
 	int dosyslog = 0;
 	int rebuild_map = 0;
 	char *remove_path = NULL;
@@ -228,10 +218,10 @@ int main(int argc, char *argv[])
 		 * set the mode if it isn't already
 		 */
 
-		switch(opt) {
+		switch (opt) {
 		case ManageOpt:
 			newmode = MANAGE;
-			shortopt = short_bitmap_options;
+			shortopt = short_bitmap_opts;
 			break;
 		case 'a':
 		case Add:
@@ -247,27 +237,33 @@ int main(int argc, char *argv[])
 		case ClusterConfirm:
 			if (!mode) {
 				newmode = MANAGE;
-				shortopt = short_bitmap_options;
+				shortopt = short_bitmap_opts;
 			}
 			break;
 
-		case 'A': newmode = ASSEMBLE;
-			shortopt = short_bitmap_auto_options;
+		case 'A':
+			newmode = ASSEMBLE;
+			shortopt = short_bitmap_auto_opts;
 			break;
-		case 'B': newmode = BUILD;
-			shortopt = short_bitmap_auto_options;
+		case 'B':
+			newmode = BUILD;
+			shortopt = short_bitmap_auto_opts;
 			break;
-		case 'C': newmode = CREATE;
-			shortopt = short_bitmap_auto_options;
+		case 'C':
+			newmode = CREATE;
+			shortopt = short_bitmap_auto_opts;
 			break;
-		case 'F': newmode = MONITOR;
-			shortopt = short_monitor_options;
+		case 'F':
+			newmode = MONITOR;
+			shortopt = short_monitor_opts;
 			break;
-		case 'G': newmode = GROW;
-			shortopt = short_bitmap_options;
+		case 'G':
+			newmode = GROW;
+			shortopt = short_bitmap_opts;
 			break;
-		case 'I': newmode = INCREMENTAL;
-			shortopt = short_bitmap_auto_options;
+		case 'I':
+			newmode = INCREMENTAL;
+			shortopt = short_bitmap_auto_opts;
 			break;
 		case AutoDetect:
 			newmode = AUTODETECT;
@@ -698,8 +694,8 @@ int main(int argc, char *argv[])
 		case O(INCREMENTAL,'a'):
 		case O(INCREMENTAL,Auto):
 		case O(ASSEMBLE,'a'):
-		case O(ASSEMBLE,Auto): /* auto-creation of device node */
-			c.autof = parse_auto(optarg, "--auto flag", 0);
+		case O(ASSEMBLE, Auto): /* auto-creation of device node - deprecated */
+			pr_info("--auto is deprecated and will be removed in future releases.\n");
 			continue;
 		case O(BUILD,'f'): /* force honouring '-n 1' */
 		case O(BUILD,Force): /* force honouring '-n 1' */
@@ -1093,24 +1089,15 @@ int main(int argc, char *argv[])
 
 		case O(ASSEMBLE,'b'): /* here we simply set the bitmap file */
 		case O(ASSEMBLE,Bitmap):
-			if (!optarg) {
-				pr_err("bitmap file needed with -b in --assemble mode\n");
-				exit(2);
-			}
-			if (strcmp(optarg, "internal") == 0 ||
-			    strcmp(optarg, "clustered") == 0) {
+			if (optarg && (strcmp(optarg, "internal") == 0 ||
+				       strcmp(optarg, "clustered")) == 0) {
 				pr_err("no need to specify --bitmap when assembling"
 					" arrays with internal or clustered bitmap\n");
 				continue;
 			}
-			bitmap_fd = open(optarg, O_RDWR);
-			if (!*optarg || bitmap_fd < 0) {
-				pr_err("cannot open bitmap file %s: %s\n", optarg, strerror(errno));
-				exit(2);
-			}
-			ident.bitmap_fd = bitmap_fd; /* for Assemble */
-			continue;
 
+			pr_err("bitmap file is not supported %s\n", optarg);
+			exit(2);
 		case O(ASSEMBLE, BackupFile):
 		case O(GROW, BackupFile):
 			/* Specify a file into which grow might place a backup,
@@ -1260,12 +1247,11 @@ int main(int argc, char *argv[])
 			pr_err("PPL consistency policy is only supported for RAID level 5.\n");
 			exit(2);
 		} else if (s.consistency_policy == CONSISTENCY_POLICY_BITMAP &&
-			  (!s.bitmap_file || str_is_none(s.bitmap_file) == true)) {
+			   s.btype == BitmapNone) {
 			pr_err("--bitmap is required for consistency policy: %s\n",
 			       map_num_s(consistency_policies, s.consistency_policy));
 			exit(2);
-		} else if (s.bitmap_file &&
-			   str_is_none(s.bitmap_file) == false &&
+		} else if ((s.btype == BitmapInternal || s.btype == BitmapCluster) &&
 			   s.consistency_policy != CONSISTENCY_POLICY_BITMAP &&
 			   s.consistency_policy != CONSISTENCY_POLICY_JOURNAL) {
 			pr_err("--bitmap is not compatible with consistency policy: %s\n",
@@ -1312,10 +1298,6 @@ int main(int argc, char *argv[])
 		if (ident_set_devname(&ident, devlist->devname) != MDADM_STATUS_SUCCESS)
 			exit(1);
 
-		if ((int)ident.super_minor == -2 && c.autof) {
-			pr_err("--super-minor=dev is incompatible with --auto\n");
-			exit(2);
-		}
 		if (mode == MANAGE || mode == GROW) {
 			mdfd = open_mddev(ident.devname, 1);
 			if (mdfd < 0)
@@ -1397,14 +1379,12 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
-	ident.autof = c.autof;
-
 	if (c.scan && c.verbose < 2)
 		/* --scan implied --brief unless -vv */
 		c.brief = 1;
 
 	if (mode == CREATE) {
-		if (s.bitmap_file && strcmp(s.bitmap_file, "clustered") == 0) {
+		if (s.btype == BitmapCluster) {
 			locked = cluster_get_dlmlock();
 			if (locked != 1)
 				exit(1);
@@ -1450,8 +1430,6 @@ int main(int argc, char *argv[])
 				if (mdfd >= 0)
 					close(mdfd);
 			} else {
-				if (array_ident->autof == 0)
-					array_ident->autof = c.autof;
 				rv |= Assemble(ss, ident.devname, array_ident, NULL, &c);
 			}
 		} else if (!c.scan)
@@ -1473,10 +1451,7 @@ int main(int argc, char *argv[])
 					rv |= 1;
 					continue;
 				}
-				if (array_ident->autof == 0)
-					array_ident->autof = c.autof;
-				rv |= Assemble(ss, dv->devname, array_ident,
-					       NULL, &c);
+				rv |= Assemble(ss, dv->devname, array_ident, NULL, &c);
 			}
 		} else {
 			if (c.update) {
@@ -1494,7 +1469,17 @@ int main(int argc, char *argv[])
 	case BUILD:
 		if (c.delay == 0)
 			c.delay = DEFAULT_BITMAP_DELAY;
-		if (s.write_behind && !s.bitmap_file) {
+
+		if (s.btype == BitmapUnknown)
+			s.btype = BitmapNone;
+
+		if (s.btype != BitmapNone) {
+			pr_err("--build argument only compatible with --bitmap=none\n");
+			rv |= 1;
+			break;
+		}
+
+		if (s.write_behind) {
 			pr_err("write-behind mode requires a bitmap.\n");
 			rv = 1;
 			break;
@@ -1505,14 +1490,6 @@ int main(int argc, char *argv[])
 			break;
 		}
 
-		if (s.bitmap_file) {
-			if (strcmp(s.bitmap_file, "internal") == 0 ||
-			    strcmp(s.bitmap_file, "clustered") == 0) {
-				pr_err("'internal' and 'clustered' bitmaps not supported with --build\n");
-				rv |= 1;
-				break;
-			}
-		}
 		rv = Build(&ident, devlist->next, &s, &c);
 		break;
 	case CREATE:
@@ -1520,8 +1497,7 @@ int main(int argc, char *argv[])
 			c.delay = DEFAULT_BITMAP_DELAY;
 
 		if (c.nodes) {
-			if (!s.bitmap_file ||
-			    strcmp(s.bitmap_file, "clustered") != 0) {
+			if (s.btype != BitmapCluster) {
 				pr_err("--nodes argument only compatible with --bitmap=clustered\n");
 				rv = 1;
 				break;
@@ -1539,7 +1515,7 @@ int main(int argc, char *argv[])
 			}
 		}
 
-		if (s.write_behind && !s.bitmap_file) {
+		if (s.write_behind && s.btype == BitmapNone) {
 			pr_err("write-behind mode requires a bitmap.\n");
 			rv = 1;
 			break;
@@ -1548,6 +1524,14 @@ int main(int argc, char *argv[])
 			pr_err("no raid-devices specified.\n");
 			rv = 1;
 			break;
+		}
+
+		if (s.btype == BitmapUnknown) {
+			if (c.runstop != 1 && s.level >= 1 &&
+			    ask("To optimalize recovery speed, it is recommended to enable write-indent bitmap, do you want to enable it now?"))
+				s.btype = BitmapInternal;
+			else
+				s.btype = BitmapNone;
 		}
 
 		rv = Create(ss, &ident, devs_found - 1, devlist->next, &s, &c);
@@ -1641,7 +1625,7 @@ int main(int argc, char *argv[])
 		if (devs_found > 1 && s.raiddisks == 0 && s.level == UnSet) {
 			/* must be '-a'. */
 			if (s.size > 0 || s.chunk ||
-			    s.layout_str || s.bitmap_file) {
+			    s.layout_str || s.btype != BitmapNone) {
 				pr_err("--add cannot be used with other geometry changes in --grow mode\n");
 				rv = 1;
 				break;
@@ -1651,7 +1635,7 @@ int main(int argc, char *argv[])
 				if (rv)
 					break;
 			}
-		} else if (s.bitmap_file) {
+		} else if (s.btype != BitmapUnknown) {
 			if (s.size > 0 || s.raiddisks || s.chunk ||
 			    s.layout_str || devs_found > 1) {
 				pr_err("--bitmap changes cannot be used with other geometry changes in --grow mode\n");
@@ -1742,11 +1726,10 @@ static int scan_assemble(struct supertype *ss,
 		pr_err("No devices listed in conf file were found.\n");
 		return 1;
 	}
-	for (a = array_list; a; a = a->next) {
+
+	for (a = array_list; a; a = a->next)
 		a->assembled = 0;
-		if (a->autof == 0)
-			a->autof = c->autof;
-	}
+
 	if (map_lock(&map))
 		pr_err("failed to get exclusive lock on mapfile\n");
 	do {
@@ -1778,7 +1761,7 @@ static int scan_assemble(struct supertype *ss,
 		 */
 		int rv2;
 		int acnt;
-		ident->autof = c->autof;
+
 		do {
 			struct mddev_dev *devlist = conf_get_devs();
 			acnt = 0;

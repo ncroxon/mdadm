@@ -75,6 +75,23 @@ void sysfs_free(struct mdinfo *sra)
 		sra = sra2;
 	}
 }
+
+mapping_t sysfs_memb_states[] = {
+	{"external_bbl", MEMB_STATE_EXTERNAL_BBL},
+	{"blocked", MEMB_STATE_BLOCKED},
+	{"spare", MEMB_STATE_SPARE},
+	{"write_mostly", MEMB_STATE_WRITE_MOSTLY},
+	{"in_sync", MEMB_STATE_IN_SYNC},
+	{"faulty", MEMB_STATE_FAULTY},
+	{"remove",  MEMB_STATE_REMOVE},
+	{NULL,  MEMB_STATE_UNKNOWN}
+};
+
+char *map_memb_state(memb_state_t state)
+{
+	return map_num_s(sysfs_memb_states, state);
+}
+
 /**
  * write_attr() - write value to fd, don't check errno.
  * @attr: value to write.
@@ -118,6 +135,44 @@ mdadm_status_t sysfs_write_descriptor(const int fd, const char *value, const ssi
 }
 
 /**
+ * sysfs_set_memb_state_fd() - write to md/<memb>/state file.
+ * @fd: open file descriptor to the file.
+ * @state: enum value describing value to write
+ * @err: errno value pointer in case of error.
+ *
+ * This is helper to avoid inlining values, they are extracted from map now.
+ */
+mdadm_status_t sysfs_set_memb_state_fd(int fd, memb_state_t state, int *err)
+{
+	const char *val = map_memb_state(state);
+
+	return sysfs_write_descriptor(fd, val, strlen(val), err);
+}
+
+/**
+ * sysfs_set_memb_state() - write to member disk state file.
+ * @array_devnm: kernel name of the array.
+ * @memb_devnm: kernel name of member device.
+ * @state: value to write.
+ *
+ * Function expects that the device exists, error is unconditionally printed.
+ */
+mdadm_status_t sysfs_set_memb_state(char *array_devnm, char *memb_devnm, memb_state_t state)
+{
+	int state_fd = sysfs_open_memb_attr(array_devnm, memb_devnm, "state", O_RDWR);
+
+	if (!is_fd_valid(state_fd)) {
+		pr_err("Cannot open file descriptor to %s in array %s, aborting.\n",
+		       memb_devnm, array_devnm);
+			return MDADM_STATUS_ERROR;
+	}
+
+	return sysfs_set_memb_state_fd(state_fd, state, NULL);
+
+	close_fd(&state_fd);
+}
+
+/**
  * sysfs_get_container_devnm() - extract container device name.
  * @mdi: md_info describes member array, with GET_VERSION option.
  * @buf: buf to fill, must be MD_NAME_MAX.
@@ -138,6 +193,24 @@ void sysfs_get_container_devnm(struct mdinfo *mdi, char *buf)
 	p = strchr(buf, '/');
 	if (p)
 		*p = 0;
+}
+
+/**
+ * sysfs_open_memb_attr() - helper to get sysfs attr descriptor for member device.
+ * @array_devnm: array kernel device name.
+ * @memb_devnm: member device kernel device name.
+ * @attr: requested sysfs attribute.
+ * @oflag: open() flags.
+ *
+ * To refer member device directory, we need to append "dev-" before the member device name.
+ */
+int sysfs_open_memb_attr(char *array_devnm, char *memb_devnm, char *attr, int oflag)
+{
+	char path[PATH_MAX];
+
+	snprintf(path, PATH_MAX, "/sys/block/%s/md/dev-%s/%s", array_devnm, memb_devnm, attr);
+
+	return open(path, oflag);
 }
 
 int sysfs_open(char *devnm, char *devname, char *attr)
@@ -189,6 +262,7 @@ out:
 	return retval;
 }
 
+/* If fd >= 0, get the array it is open on, else use devnm. */
 struct mdinfo *sysfs_read(int fd, char *devnm, unsigned long options)
 {
 	char fname[PATH_MAX];
@@ -817,8 +891,8 @@ int sysfs_add_disk(struct mdinfo *sra, struct mdinfo *sd, int resume)
 
 	memset(nm, 0, sizeof(nm));
 	dname = devid2kname(makedev(sd->disk.major, sd->disk.minor));
-	strcpy(sd->sys_name, "dev-");
-	strcpy(sd->sys_name+4, dname);
+
+	snprintf(sd->sys_name, sizeof(sd->sys_name), "dev-%s", dname);
 
 	/* test write to see if 'recovery_start' is available */
 	if (resume && sd->recovery_start < MaxSector &&

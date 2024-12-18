@@ -414,7 +414,14 @@ struct mdinfo {
 	#define DS_BLOCKED	16
 	#define	DS_REMOVE	1024
 	#define	DS_UNBLOCK	2048
+	#define	DS_EXTERNAL_BB	4096
 	int prev_state, curr_state, next_state;
+
+	/* If set by monitor, managemon needs to remove faulty device */
+	bool man_disk_to_remove : 1;
+
+	/* Managemon cannot close descriptors if monitor is using them for select() */
+	bool mon_descriptors_not_used : 1;
 
 	/* info read from sysfs */
 	enum {
@@ -463,10 +470,8 @@ enum mode {
 	mode_count
 };
 
-extern char short_options[];
-extern char short_monitor_options[];
-extern char short_bitmap_options[];
-extern char short_bitmap_auto_options[];
+extern char short_opts[], short_monitor_opts[], short_bitmap_opts[], short_bitmap_auto_opts[];
+
 extern struct option long_options[];
 extern char Version[], Usage[], Help[], OptionHelp[],
 	*mode_help[],
@@ -593,9 +598,16 @@ enum prefix_standard {
 };
 
 enum bitmap_update {
-    NoUpdate,
-    NameUpdate,
-    NodeNumUpdate,
+	NoUpdate,
+	NameUpdate,
+	NodeNumUpdate,
+};
+
+enum bitmap_type {
+	BitmapNone,
+	BitmapInternal,
+	BitmapCluster,
+	BitmapUnknown,
 };
 
 enum flag_mode {
@@ -634,10 +646,8 @@ struct mddev_ident {
 	int raid_disks;
 	int spare_disks;
 	struct supertype *st;
-	int	autof;		/* 1 for normal, 2 for partitioned */
 	char	*spare_group;
-	char	*bitmap_file;
-	int	bitmap_fd;
+	enum bitmap_type btype;
 
 	char	*container;	/* /dev/whatever name of container, or
 				 * uuid of container.  You would expect
@@ -669,7 +679,6 @@ struct context {
 	enum	update_opt update;
 	int	scan;
 	int	SparcAdjust;
-	int	autof;
 	int	delay;
 	int	freeze_reshape;
 	char	*backup_file;
@@ -690,7 +699,7 @@ struct shape {
 	char	*layout_str;
 	int	chunk;
 	int	bitmap_chunk;
-	char	*bitmap_file;
+	enum bitmap_type btype;
 	int	assume_clean;
 	bool	write_zeroes;
 	int	write_behind;
@@ -798,18 +807,37 @@ enum sysfs_read_flags {
 
 #define SYSFS_MAX_BUF_SIZE 64
 
+/**
+ * Defines md/<disk>/state possible values.
+ * Note that remove can't be read-back from the file.
+ *
+ * This is not complete list.
+ */
+typedef enum memb_state {
+	MEMB_STATE_EXTERNAL_BBL,
+	MEMB_STATE_BLOCKED,
+	MEMB_STATE_SPARE,
+	MEMB_STATE_WRITE_MOSTLY,
+	MEMB_STATE_IN_SYNC,
+	MEMB_STATE_FAULTY,
+	MEMB_STATE_REMOVE,
+	MEMB_STATE_UNKNOWN
+} memb_state_t;
+char *map_memb_state(memb_state_t state);
+
 extern mdadm_status_t sysfs_write_descriptor(const int fd, const char *value,
 					     const ssize_t len, int *errno_p);
 extern mdadm_status_t write_attr(const char *value, const int fd);
+extern mdadm_status_t sysfs_set_memb_state_fd(int fd, memb_state_t state, int *err);
+extern mdadm_status_t sysfs_set_memb_state(char *array_devnm, char *memb_devnm, memb_state_t state);
 extern void sysfs_get_container_devnm(struct mdinfo *mdi, char *buf);
 
-/* If fd >= 0, get the array it is open on,
- * else use devnm.
- */
 extern int sysfs_open(char *devnm, char *devname, char *attr);
+extern int sysfs_open_memb_attr(char *array_devnm, char *memb_devnm, char *attr, int oflag);
 extern int sysfs_init(struct mdinfo *mdi, int fd, char *devnm);
 extern void sysfs_init_dev(struct mdinfo *mdi, dev_t devid);
 extern void sysfs_free(struct mdinfo *sra);
+
 extern struct mdinfo *sysfs_read(int fd, char *devnm, unsigned long options);
 extern int sysfs_attr_match(const char *attr, const char *str);
 extern int sysfs_match_word(const char *word, char **list);
@@ -1756,8 +1784,6 @@ extern char *human_size(long long bytes);
 extern char *human_size_brief(long long bytes, int prefix);
 extern void print_r10_layout(int layout);
 
-extern char *find_free_devnm(int use_partitions);
-
 extern void put_md_name(char *name);
 extern char *devid2kname(dev_t devid);
 extern char *devid2devnm(dev_t devid);
@@ -1766,8 +1792,7 @@ extern char *get_md_name(char *devnm);
 
 extern char DefaultConfFile[];
 
-extern int create_mddev(char *dev, char *name, int autof, int trustworthy,
-			char *chosen, int block_udev);
+extern int create_mddev(char *dev, char *name, int trustworthy, char *chosen, int block_udev);
 /* values for 'trustworthy' */
 #define	LOCAL	1
 #define	LOCAL_ANY 10
@@ -1900,15 +1925,23 @@ static inline sighandler_t signal_s(int sig, sighandler_t handler)
 }
 
 #ifdef DEBUG
+#include <time.h>
+
 #define dprintf(fmt, arg...) \
-	fprintf(stderr, "%s: %s: "fmt, Name, __func__, ##arg)
+	do { \
+		struct timespec ts; \
+		clock_gettime(CLOCK_MONOTONIC, &ts); \
+		double timestamp = ts.tv_sec + ts.tv_nsec / 1e9; \
+		fprintf(stderr, "[%10.5f] %s: %s: " fmt, timestamp, Name, __func__, ##arg); \
+	} while (0)
+
 #define dprintf_cont(fmt, arg...) \
 	fprintf(stderr, fmt, ##arg)
 #else
 #define dprintf(fmt, arg...) \
-        ({ if (0) fprintf(stderr, "%s: %s: " fmt, Name, __func__, ##arg); 0; })
+	do { } while (0)
 #define dprintf_cont(fmt, arg...) \
-        ({ if (0) fprintf(stderr, fmt, ##arg); 0; })
+	do { } while (0)
 #endif
 
 static inline int xasprintf(char **strp, const char *fmt, ...) {

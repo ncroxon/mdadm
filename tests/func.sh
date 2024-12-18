@@ -59,7 +59,7 @@ save_log() {
 	array=($(mdadm -Ds | cut -d' ' -f2))
 	[ "$1" == "fail" ] &&
 		fail "FAILED"
-		echo " - see $logdir/$_basename.log and $logdir/$logfile for details\n"
+		echo " - see $logdir/$_basename.log and $logdir/$logfile for details"
 	if [ $DEVTYPE == 'lvm' ]
 	then
 		# not supported lvm type yet
@@ -186,7 +186,7 @@ is_raid_foreign() {
 	# to decide if an array is foreign or local. It adds homehost if
 	# one array is local
 	hostname=$(hostname)
-	if [ `expr length "$(hostname)$name"` -lt 31 ]; then
+	if [ `expr length "$(hostname):$name"` -lt 31 ]; then
 		is_foreign="no"
 	else
 		is_foreign="yes"
@@ -200,6 +200,24 @@ record_selinux() {
 
 restore_selinux() {
 	setenforce $sys_selinux
+}
+
+wait_for_reshape_end() {
+	# wait for grow-continue to finish but break if sync_action does not
+	# contain any reshape value
+	while true
+	do
+		sync_action=$(grep -Ec '(resync|recovery|reshape|check|repair) *=' /proc/mdstat)
+		if (( "$sync_action" != 0 )); then
+			sleep 2
+			continue
+		elif [[ $(pgrep -f "mdadm --grow --continue" > /dev/null) != "" ]]; then
+			echo "Grow continue did not finish but reshape is done" >&2
+			exit 1
+		else
+			break
+		fi
+	done
 }
 
 setup_systemd_env() {
@@ -357,15 +375,28 @@ check() {
 		max=`cat /proc/sys/dev/raid/speed_limit_max`
 		echo 200000 > /proc/sys/dev/raid/speed_limit_max
 		sleep 0.1
-		while grep -Eq '(resync|recovery|reshape|check|repair) *=' /proc/mdstat ||
-			grep -v idle > /dev/null /sys/block/md*/md/sync_action
+		iterations=0
+		# Wait 10 seconds for one of the actions appears in sync_action.
+		while [ $iterations -le 10 ]
 		do
-			sleep 0.5
+			sync_action=$(grep -Ec '(resync|recovery|reshape|check|repair) *=' /proc/mdstat)
+			if (( "$sync_action" == 0 )); then
+				sleep 2
+				iterations=$(( $iterations + 1 ))
+				continue
+			else
+				break
+			fi
 		done
-		while ps auxf | grep "mdadm --grow --continue" | grep -v grep
-		do
-			sleep 1
-		done
+		echo "Reshape has not started after 10 seconds"
+
+		# Now let's wait for reshape to finish.
+		echo "Waiting for grow-continue to finish"
+		wait_for_reshape_end
+		# If we have matrix-raid there's a second process ongoing
+		sleep 5
+		wait_for_reshape_end
+
 		echo $min > /proc/sys/dev/raid/speed_limit_min
 		echo $max > /proc/sys/dev/raid/speed_limit_max
 	;;
@@ -414,7 +445,7 @@ no_errors() {
 
 # basic device test
 testdev() {
-	[ -b $1 ] || die "$1 isn't a block device."
+	lsblk -no name $1 || die "$1 isn't a block device."
 	[ "$DEVTYPE" == "disk" ] && return 0
 	udevadm settle
 	dev=$1

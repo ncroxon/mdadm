@@ -645,6 +645,14 @@ struct imsm_update_rwh_policy {
 	int dev_idx;
 };
 
+enum imsm_sku {
+	SKU_NO_KEY = 0,
+	SKU_STANDARD_KEY = 1,
+	SKU_PREMIUM_KEY = 2,
+	SKU_INTEL_SSD_ONLY_KEY = 3,
+	SKU_RAID1_ONLY_KEY = 4
+};
+
 static const char *_sys_dev_type[] = {
 	[SYS_DEV_UNKNOWN] = "Unknown",
 	[SYS_DEV_SAS] = "SAS",
@@ -2658,6 +2666,39 @@ static void print_imsm_level_capability(const struct imsm_orom *orom)
 			printf("%s ", imsm_level_ops[idx].name);
 }
 
+static void print_imsm_sku_capability(const struct imsm_orom *orom)
+{
+	int key_val;
+
+	key_val = (orom->driver_features & IMSM_OROM_CAPABILITIES_SKUMode_LOW) >>
+		   IMSM_OROM_CAPABILITIES_SKUMode_LOW_SHIFT;
+	key_val |= (orom->driver_features & IMSM_OROM_CAPABILITIES_SKUMode_HIGH) >>
+		    IMSM_OROM_CAPABILITIES_SKUMode_HIGH_SHIFT;
+
+	switch (key_val) {
+	case SKU_NO_KEY:
+		printf("Pass-through");
+		break;
+	case SKU_STANDARD_KEY:
+		printf("Standard");
+		break;
+	case SKU_PREMIUM_KEY:
+		printf("Premium");
+		break;
+	case SKU_INTEL_SSD_ONLY_KEY:
+		printf("Intel-SSD-only");
+		break;
+	case SKU_RAID1_ONLY_KEY:
+		printf("RAID1 Only");
+		break;
+	default:
+		printf("Unknown");
+	}
+
+	if (orom->driver_features & IMSM_OROM_CAPABILITIES_SKUMode_NON_PRODUCTION)
+		printf(" - for evaluation only");
+}
+
 static void print_imsm_chunk_size_capability(const struct imsm_orom *orom)
 {
 	int idx;
@@ -2688,6 +2729,12 @@ static void print_imsm_capability(const struct orom_entry *entry)
 		else
 			printf("        Version : %d.%d.%d.%d\n", orom->major_ver, orom->minor_ver,
 			       orom->hotfix_ver, orom->build);
+	}
+
+	if (entry->type == SYS_DEV_VMD) {
+		printf("        License : ");
+		print_imsm_sku_capability(orom);
+		printf("\n");
 	}
 
 	printf("    RAID Levels : ");
@@ -5045,7 +5092,6 @@ imsm_thunderdome(struct intel_super **super_list, int len)
 	for (i = 0; i < tbl_size; i++) {
 		struct imsm_disk *d;
 		struct intel_disk *idisk;
-		struct imsm_super *mpb = super_table[i]->anchor;
 
 		s = super_table[i];
 		d = &s->disks->disk;
@@ -5061,7 +5107,7 @@ imsm_thunderdome(struct intel_super **super_list, int len)
 
 		if (!s)
 			dprintf("marking family: %#x from %d:%d offline\n",
-				mpb->family_num,
+				super_table[i]->anchor->family_num,
 				super_table[i]->disks->major,
 				super_table[i]->disks->minor);
 		super_table[i] = s;
@@ -6075,7 +6121,8 @@ static int add_to_super_imsm(struct supertype *st, mdu_disk_info_t *dk,
 			pr_err("%s controller supports Multi-Path I/O, Intel (R) VROC does not support multipathing\n",
 			       basename(cntrl_path));
 
-		if (super->orom && !imsm_orom_has_tpv_support(super->orom)) {
+		if (super->orom && devpath_to_vendor(pci_dev_path) != 0x8086 &&
+		    !imsm_orom_has_tpv_support(super->orom)) {
 			pr_err("\tPlatform configuration does not support non-Intel NVMe drives.\n"
 			       "\tPlease refer to Intel(R) RSTe/VROC user guide.\n");
 			goto error;
@@ -7009,7 +7056,8 @@ active_arrays_by_format(char *name, char* hba, struct md_list **devlist,
 			int fd = -1;
 
 			while (dev && !is_fd_valid(fd)) {
-				char *path = xmalloc(strlen(dev->name) + strlen("/dev/") + 1);
+				char path[PATH_MAX];
+
 				num = snprintf(path, PATH_MAX, "%s%s", "/dev/", dev->name);
 				if (num > 0)
 					fd = open(path, O_RDONLY, 0);
@@ -7017,7 +7065,6 @@ active_arrays_by_format(char *name, char* hba, struct md_list **devlist,
 					pr_vrb("Cannot open %s: %s\n",
 					       dev->name, strerror(errno));
 				}
-				free(path);
 				dev = dev->next;
 			}
 			found = 0;

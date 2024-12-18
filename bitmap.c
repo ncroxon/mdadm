@@ -200,28 +200,32 @@ bitmap_file_open(char *filename, struct supertype **stp, int node_num, int fd)
 		close(fd);
 		return -1;
 	}
-	if ((stb.st_mode & S_IFMT) == S_IFBLK) {
-		/* block device, so we are probably after an internal bitmap */
-		if (!st)
-			st = guess_super(fd);
-		if (!st) {
-			/* just look at device... */
-			lseek(fd, 0, 0);
-		} else if (!st->ss->locate_bitmap) {
-			pr_err("No bitmap possible with %s metadata\n",
-				st->ss->name);
-			close(fd);
-			return -1;
-		} else {
-			if (st->ss->locate_bitmap(st, fd, node_num)) {
-				pr_err("%s doesn't have bitmap\n", filename);
-				close(fd);
-				fd = -1;
-			}
-		}
-		*stp = st;
+
+	if ((stb.st_mode & S_IFMT) != S_IFBLK) {
+		pr_err("bitmap file is not supported %s\n", filename);
+		close(fd);
+		return -1;
 	}
 
+	if (!st)
+		st = guess_super(fd);
+
+	if (!st) {
+		/* just look at device... */
+		lseek(fd, 0, 0);
+	} else if (!st->ss->locate_bitmap) {
+		pr_err("No bitmap possible with %s metadata\n", st->ss->name);
+		close(fd);
+		return -1;
+	}
+
+	if (st->ss->locate_bitmap(st, fd, node_num)) {
+		pr_err("%s doesn't have bitmap\n", filename);
+		close(fd);
+		fd = -1;
+	}
+
+	*stp = st;
 	return fd;
 }
 
@@ -256,8 +260,11 @@ int ExamineBitmap(char *filename, int brief, struct supertype *st)
 		return rv;
 
 	info = bitmap_fd_read(fd, brief);
-	if (!info)
+	if (!info) {
+		close_fd(&fd);
+		free(info);
 		return rv;
+	}
 	sb = &info->sb;
 	if (sb->magic != BITMAP_MAGIC) {
 		pr_err("This is an md array.  To view a bitmap you need to examine\n");
@@ -332,7 +339,6 @@ int ExamineBitmap(char *filename, int brief, struct supertype *st)
 		printf("    Cluster name : %-64s\n", sb->cluster_name);
 		for (i = 0; i < (int)sb->nodes; i++) {
 			st = NULL;
-			free(info);
 			fd = bitmap_file_open(filename, &st, i, fd);
 			if (fd < 0) {
 				printf("   Unable to open bitmap file on node: %i\n", i);
@@ -343,6 +349,7 @@ int ExamineBitmap(char *filename, int brief, struct supertype *st)
 				printf("   Unable to read bitmap on node: %i\n", i);
 				continue;
 			}
+			free(sb);
 			sb = &info->sb;
 			if (sb->magic != BITMAP_MAGIC)
 				pr_err("invalid bitmap magic 0x%x, the bitmap file appears to be corrupted\n", sb->magic);
