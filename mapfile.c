@@ -43,85 +43,93 @@
  * at compile time via MAP_DIR and MAP_FILE.
  */
 #include	"mdadm.h"
+#include	"mapfile.h"
 #include	"mdstat.h"
 #include	"xmalloc.h"
 
 #include	<sys/file.h>
 #include	<ctype.h>
 
-#define MAP_READ 0
-#define MAP_NEW 1
-#define MAP_LOCK 2
-#define MAP_DIRNAME 3
-
-char *mapname[4] = {
-	MAP_DIR "/" MAP_FILE,
-	MAP_DIR "/" MAP_FILE ".new",
-	MAP_DIR "/" MAP_FILE ".lock",
-	MAP_DIR
+enum map_file_mode {
+	MAP_READ = 0,
+	MAP_NEW = 1,
+	MAP_LOCK = 2,
 };
 
-int mapmode[3] = { O_RDONLY, O_RDWR|O_CREAT, O_RDWR|O_CREAT|O_TRUNC };
-char *mapsmode[3] = { "r", "w", "w"};
+struct map_file_desc {
+	const char *name;
+	const char *fmode;
+	int mode;
+};
 
-FILE *open_map(int modenum)
+static const struct map_file_desc map_files[] = {
+	[MAP_READ] = { MAP_DIR "/" MAP_FILE,         "r", O_RDONLY},
+	[MAP_NEW]  = { MAP_DIR "/" MAP_FILE ".new",  "w", O_RDWR|O_CREAT},
+	[MAP_LOCK] = { MAP_DIR "/" MAP_FILE ".lock", "w", O_RDWR|O_CREAT|O_TRUNC},
+};
+
+static FILE *open_map(enum map_file_mode modenum)
 {
 	int fd;
-	if ((mapmode[modenum] & O_CREAT))
+
+	if (map_files[modenum].mode & O_CREAT)
 		/* Attempt to create directory, don't worry about
 		 * failure.
 		 */
-		(void)mkdir(mapname[MAP_DIRNAME], 0755);
-	fd = open(mapname[modenum], mapmode[modenum], 0600);
+		(void)mkdir(MAP_DIR, 0755);
+
+	fd = open(map_files[modenum].name, map_files[modenum].mode, 0600);
 	if (fd >= 0)
-		return fdopen(fd, mapsmode[modenum]);
+		return fdopen(fd, map_files[modenum].fmode);
 	return NULL;
 }
 
-int map_write(struct map_ent *mel)
+int map_write(struct map_ent *map)
 {
 	FILE *f;
 	int err;
 
 	f = open_map(MAP_NEW);
-
 	if (!f)
 		return 0;
-	for (; mel; mel = mel->next) {
-		if (mel->bad)
+
+	for (; map; map = map->next) {
+		if (map->bad)
 			continue;
-		fprintf(f, "%s ", mel->devnm);
-		fprintf(f, "%s ", mel->metadata);
-		fprintf(f, "%08x:%08x:%08x:%08x ", mel->uuid[0],
-			mel->uuid[1], mel->uuid[2], mel->uuid[3]);
-		fprintf(f, "%s\n", mel->path?:"");
+
+		fprintf(f, "%s ", map->devnm);
+		fprintf(f, "%s ", map->metadata);
+		fprintf(f, "%08x:%08x:%08x:%08x ", map->uuid[0],
+			map->uuid[1], map->uuid[2], map->uuid[3]);
+		fprintf(f, "%s\n", map->path ?: "");
 	}
 	fflush(f);
 	err = ferror(f);
 	fclose(f);
 	if (err) {
-		unlink(mapname[1]);
+		unlink(map_files[MAP_NEW].name);
 		return 0;
 	}
-	return rename(mapname[1],
-		      mapname[0]) == 0;
+	return rename(map_files[MAP_NEW].name, map_files[MAP_READ].name) == 0;
 }
 
 static FILE *lf = NULL;
-int map_lock(struct map_ent **melp)
+int map_lock(struct map_ent **mpp)
 {
 	while (lf == NULL) {
 		struct stat buf;
+
 		lf = open_map(MAP_LOCK);
 		if (lf == NULL)
 			return -1;
+
 		if (flock(fileno(lf), LOCK_EX) != 0) {
 			fclose(lf);
 			lf = NULL;
 			return -1;
 		}
-		if (fstat(fileno(lf), &buf) != 0 ||
-		    buf.st_nlink == 0) {
+
+		if (fstat(fileno(lf), &buf) != 0 || buf.st_nlink == 0) {
 			/* The owner of the lock unlinked it,
 			 * so we have a lock on a stale file,
 			 * try again
@@ -130,24 +138,27 @@ int map_lock(struct map_ent **melp)
 			lf = NULL;
 		}
 	}
-	if (*melp)
-		map_free(*melp);
-	map_read(melp);
+	if (*mpp)
+		map_free(*mpp);
+
+	map_read(mpp);
 	return 0;
 }
 
-void map_unlock(struct map_ent **melp)
+void map_unlock(struct map_ent **mpp)
 {
 	if (lf) {
 		/* must unlink before closing the file,
 		 * as only the owner of the lock may
 		 * unlink the file
 		 */
-		unlink(mapname[2]);
+		unlink(map_files[MAP_LOCK].name);
 		fclose(lf);
 	}
-	if (*melp)
-		map_free(*melp);
+
+	if (*mpp)
+		map_free(*mpp);
+
 	lf = NULL;
 }
 
@@ -163,8 +174,7 @@ void map_fork(void)
 	}
 }
 
-void map_add(struct map_ent **melp,
-	     char * devnm, char *metadata, int uuid[4], char *path)
+void map_add(struct map_ent **mpp, char *devnm, char *metadata, int uuid[4], char *path)
 {
 	struct map_ent *me = xmalloc(sizeof(*me));
 
@@ -172,21 +182,20 @@ void map_add(struct map_ent **melp,
 	snprintf(me->metadata, sizeof(me->metadata), "%s", metadata);
 	memcpy(me->uuid, uuid, 16);
 	me->path = path ? xstrdup(path) : NULL;
-	me->next = *melp;
+	me->next = *mpp;
 	me->bad = 0;
-	*melp = me;
+	*mpp = me;
 }
 
-void map_read(struct map_ent **melp)
+void map_read(struct map_ent **mpp)
 {
-	FILE *f;
-	char buf[8192];
-	char path[201];
-	int uuid[4];
-	char devnm[32];
 	char metadata[30];
+	char buf[8192];
+	char devnm[MD_NAME_MAX];
+	int uuid[4];
+	FILE *f;
 
-	*melp = NULL;
+	*mpp = NULL;
 
 	f = open_map(MAP_READ);
 	if (!f) {
@@ -197,11 +206,11 @@ void map_read(struct map_ent **melp)
 		return;
 
 	while (fgets(buf, sizeof(buf), f)) {
-		path[0] = 0;
+		char path[PATH_MAX] = {0};
+
 		if (sscanf(buf, " %s %s %x:%x:%x:%x %200s",
-			   devnm, metadata, uuid, uuid+1,
-			   uuid+2, uuid+3, path) >= 7) {
-			map_add(melp, devnm, metadata, uuid, path);
+			   devnm, metadata, uuid, uuid+1, uuid+2, uuid+3, path) >= 7) {
+			map_add(mpp, devnm, metadata, uuid, path);
 		}
 	}
 	fclose(f);
@@ -211,14 +220,14 @@ void map_free(struct map_ent *map)
 {
 	while (map) {
 		struct map_ent *mp = map;
+
 		map = mp->next;
 		free(mp->path);
 		free(mp);
 	}
 }
 
-int map_update(struct map_ent **mpp, char *devnm, char *metadata,
-	       int uuid[4], char *path)
+int map_update(struct map_ent **mpp, char *devnm, char *metadata, int uuid[4], char *path)
 {
 	struct map_ent *map, *mp;
 	int rv;
@@ -228,11 +237,13 @@ int map_update(struct map_ent **mpp, char *devnm, char *metadata,
 	else
 		map_read(&map);
 
-	for (mp = map ; mp ; mp=mp->next)
+	for (mp = map; mp; mp = mp->next)
 		if (strcmp(mp->devnm, devnm) == 0) {
 			snprintf(mp->metadata, sizeof(mp->metadata), "%s", metadata);
 			memcpy(mp->uuid, uuid, 16);
+
 			free(mp->path);
+
 			mp->path = path ? xstrdup(path) : NULL;
 			mp->bad = 0;
 			break;
@@ -241,46 +252,50 @@ int map_update(struct map_ent **mpp, char *devnm, char *metadata,
 		map_add(&map, devnm, metadata, uuid, path);
 	if (mpp)
 		*mpp = NULL;
+
 	rv = map_write(map);
 	map_free(map);
 	return rv;
 }
 
-void map_delete(struct map_ent **mapp, char *devnm)
+void map_delete(struct map_ent **mpp, char *devnm)
 {
 	struct map_ent *mp;
 
-	if (*mapp == NULL)
-		map_read(mapp);
+	if (*mpp == NULL)
+		map_read(mpp);
 
-	for (mp = *mapp; mp; mp = *mapp) {
+	for (mp = *mpp; mp; mp = *mpp) {
 		if (strcmp(mp->devnm, devnm) == 0) {
-			*mapp = mp->next;
+			*mpp = mp->next;
+
 			free(mp->path);
 			free(mp);
-		} else
-			mapp = & mp->next;
+		} else {
+			mpp = &mp->next;
+		}
 	}
 }
 
-void map_remove(struct map_ent **mapp, char *devnm)
+void map_remove(struct map_ent **mpp, char *devnm)
 {
 	if (devnm[0] == 0)
 		return;
 
-	map_delete(mapp, devnm);
-	map_write(*mapp);
-	map_free(*mapp);
-	*mapp = NULL;
+	map_delete(mpp, devnm);
+	map_write(*mpp);
+	map_free(*mpp);
+	*mpp = NULL;
 }
 
-struct map_ent *map_by_uuid(struct map_ent **map, int uuid[4])
+struct map_ent *map_by_uuid(struct map_ent **mpp, int uuid[4])
 {
 	struct map_ent *mp;
-	if (!*map)
-		map_read(map);
 
-	for (mp = *map ; mp ; mp = mp->next) {
+	if (!*mpp)
+		map_read(mpp);
+
+	for (mp = *mpp; mp; mp = mp->next) {
 		if (memcmp(uuid, mp->uuid, 16) != 0)
 			continue;
 		if (!mddev_busy(mp->devnm)) {
@@ -292,17 +307,17 @@ struct map_ent *map_by_uuid(struct map_ent **map, int uuid[4])
 	return NULL;
 }
 
-struct map_ent *map_by_devnm(struct map_ent **map, char *devnm)
+struct map_ent *map_by_devnm(struct map_ent **mpp, char *devnm)
 {
 	struct map_ent *mp;
 
 	if (!devnm)
 		return NULL;
 
-	if (!*map)
-		map_read(map);
+	if (!*mpp)
+		map_read(mpp);
 
-	for (mp = *map ; mp ; mp = mp->next) {
+	for (mp = *mpp; mp; mp = mp->next) {
 		if (strcmp(mp->devnm, devnm) != 0)
 			continue;
 		if (!mddev_busy(mp->devnm)) {
@@ -314,13 +329,14 @@ struct map_ent *map_by_devnm(struct map_ent **map, char *devnm)
 	return NULL;
 }
 
-struct map_ent *map_by_name(struct map_ent **map, char *name)
+struct map_ent *map_by_name(struct map_ent **mpp, char *name)
 {
 	struct map_ent *mp;
-	if (!*map)
-		map_read(map);
 
-	for (mp = *map ; mp ; mp = mp->next) {
+	if (!*mpp)
+		map_read(mpp);
+
+	for (mp = *mpp; mp; mp = mp->next) {
 		if (!mp->path)
 			continue;
 		if (strncmp(mp->path, DEV_MD_DIR, DEV_MD_DIR_LEN) != 0)
@@ -352,53 +368,118 @@ static char *get_member_info(struct mdstat_ent *ent)
 	return subarray + 1;
 }
 
+/* Resolve a /dev/md/ path for an array when no suitable path is already known.
+ * Returns a path from conf or generates a unique one stored in @namebuf.
+ */
+static char *resolve_md_path(struct supertype *st, struct mdinfo *info, char *homehost,
+			     int require_homehost, struct map_ent **map, char *namebuf)
+{
+	struct mddev_ident *match = conf_match(st, info, NULL, 0, NULL);
+	int conflict = 1;
+	const char *name;
+	char *sep = "_";
+	struct stat stb;
+	int unum = -1;
+
+	if (match && match->devname && match->devname[0] == '/') {
+		char *path = match->devname;
+
+		if (path[0] != '/') {
+			strcpy(namebuf, DEV_MD_DIR);
+			strcat(namebuf, path);
+			path = namebuf;
+		}
+		return path;
+	}
+
+	if ((homehost == NULL || st->ss->match_home(st, homehost) != 1) &&
+	    st->ss->match_home(st, "any") != 1 &&
+	    (require_homehost || !conf_name_is_free(info->name)))
+		/* require a numeric suffix */
+		unum = 0;
+
+	name = info->name;
+	if (!*name) {
+		name = st->ss->name;
+		if (!isdigit(name[strlen(name)-1]) && unum == -1) {
+			unum = 0;
+			sep = "";
+		}
+	}
+
+	if (strchr(name, ':')) {
+		/* Probably a hostname prefix.
+		 * Allow without a suffix, and strip hostname if it is us.
+		 */
+		if (homehost && unum == -1 && strncmp(name, homehost, strlen(homehost)) == 0 &&
+		    name[strlen(homehost)] == ':')
+			name += strlen(homehost) + 1;
+		unum = -1;
+	}
+
+	while (conflict) {
+		if (unum >= 0)
+			sprintf(namebuf, DEV_MD_DIR "%s%s%d", name, sep, unum);
+		else
+			sprintf(namebuf, DEV_MD_DIR "%s", name);
+		unum++;
+		if (lstat(namebuf, &stb) != 0 &&
+		    (*map == NULL || !map_by_name(map, namebuf + DEV_MD_DIR_LEN)))
+			conflict = 0;
+	}
+	return namebuf;
+}
+
 void RebuildMap(void)
 {
-	struct mdstat_ent *mdstat = mdstat_read(0, 0);
-	struct mdstat_ent *md;
-	struct map_ent *map = NULL;
 	int require_homehost;
-	char sys_hostname[256];
 	char *homehost = conf_get_homehost(&require_homehost);
+	struct mdstat_ent *mdstat = mdstat_read(0, 0);
+	struct map_ent *map = NULL;
+	char sys_hostname[256];
+	struct mdstat_ent *md;
 
-	if (homehost == NULL || strcmp(homehost, "<system>")==0) {
+	if (homehost == NULL || strcmp(homehost, "<system>") == 0) {
 		if (s_gethostname(sys_hostname, sizeof(sys_hostname)) == 0) {
 			homehost = sys_hostname;
 		}
 	}
 
-	for (md = mdstat ; md ; md = md->next) {
+	for (md = mdstat; md; md = md->next) {
 		struct mdinfo *sra = sysfs_read(-1, md->devnm, GET_DEVS);
 		struct mdinfo *sd;
 
 		if (!sra)
 			continue;
 
-		for (sd = sra->devs ; sd ; sd = sd->next) {
+		for (sd = sra->devs; sd; sd = sd->next) {
+			char *subarray = NULL;
+			struct supertype *st;
+			struct mdinfo *info;
 			char namebuf[100];
+			dev_t devid;
 			char dn[30];
+			char *path;
 			int dfd;
 			int ok;
-			dev_t devid;
-			struct supertype *st;
-			char *subarray = NULL;
-			char *path;
-			struct mdinfo *info;
 
 			sprintf(dn, "%d:%d", sd->disk.major, sd->disk.minor);
 			dfd = dev_open(dn, O_RDONLY);
 			if (dfd < 0)
 				continue;
+
 			st = guess_super(dfd);
-			if ( st == NULL)
+			if (!st)
 				ok = -1;
 			else {
 				subarray = get_member_info(md);
 				ok = st->ss->load_super(st, dfd, NULL);
 			}
+
 			close(dfd);
 			if (ok != 0)
 				continue;
+
 			if (subarray)
 				info = st->ss->container_content(st, subarray);
 			else {
@@ -410,89 +491,11 @@ void RebuildMap(void)
 
 			devid = devnm2devid(md->devnm);
 			path = map_dev(major(devid), minor(devid), 0);
-			if (path == NULL ||
-			    strncmp(path, DEV_MD_DIR, DEV_MD_DIR_LEN) != 0) {
-				/* We would really like a name that provides
-				 * an MD_DEVNAME for udev.
-				 * The name needs to be unique both in /dev/md/
-				 * and in this mapfile.
-				 * It needs to match what -I or -As would come
-				 * up with.
-				 * That means:
-				 *   Check if array is in mdadm.conf
-				 *        - if so use that.
-				 *   determine trustworthy from homehost etc
-				 *   find a unique name based on metadata name.
-				 *
-				 */
-				struct mddev_ident *match = conf_match(st, info,
-								       NULL, 0,
-								       NULL);
-				struct stat stb;
-				if (match && match->devname && match->devname[0] == '/') {
-					path = match->devname;
-					if (path[0] != '/') {
-						strcpy(namebuf, DEV_MD_DIR);
-						strcat(namebuf, path);
-						path = namebuf;
-					}
-				} else {
-					int unum = 0;
-					char *sep = "_";
-					const char *name;
-					int conflict = 1;
-					if ((homehost == NULL ||
-					     st->ss->match_home(st, homehost) != 1) &&
-					    st->ss->match_home(st, "any") != 1 &&
-					    (require_homehost ||
-					     !conf_name_is_free(info->name)))
-						/* require a numeric suffix */
-						unum = 0;
-					else
-						/* allow name to be used as-is if no conflict */
-						unum = -1;
-					name = info->name;
-					if (!*name) {
-						name = st->ss->name;
-						if (!isdigit(name[strlen(name)-1]) &&
-						    unum == -1) {
-							unum = 0;
-							sep = "";
-						}
-					}
-					if (strchr(name, ':')) {
-						/* Probably a uniquifying
-						 * hostname prefix.  Allow
-						 * without a suffix, and strip
-						 * hostname if it is us.
-						 */
-						if (homehost && unum == -1 &&
-						    strncmp(name, homehost,
-							    strlen(homehost)) == 0 &&
-						    name[strlen(homehost)] == ':')
-							name += strlen(homehost)+1;
-						unum = -1;
-					}
 
-					while (conflict) {
-						if (unum >= 0)
-							sprintf(namebuf, DEV_MD_DIR "%s%s%d",
-								name, sep, unum);
-						else
-							sprintf(namebuf, DEV_MD_DIR "%s",
-								name);
-						unum++;
-						if (lstat(namebuf, &stb) != 0 &&
-						    (map == NULL ||
-						     !map_by_name(&map, namebuf+8)))
-							conflict = 0;
-					}
-					path = namebuf;
-				}
-			}
-			map_add(&map, md->devnm,
-				info->text_version,
-				info->uuid, path);
+			if (path == NULL || strncmp(path, DEV_MD_DIR, DEV_MD_DIR_LEN) != 0)
+				path = resolve_md_path(st, info, homehost, require_homehost,
+						       &map, namebuf);
+			map_add(&map, md->devnm, info->text_version, info->uuid, path);
 			st->ss->free_super(st);
 			free(info);
 			break;
@@ -501,9 +504,9 @@ void RebuildMap(void)
 	}
 	/* Only trigger a change if we wrote a new map file */
 	if (map_write(map))
-		for (md = mdstat ; md ; md = md->next) {
-			struct mdinfo *sra = sysfs_read(-1, md->devnm,
-							GET_VERSION);
+		for (md = mdstat; md; md = md->next) {
+			struct mdinfo *sra = sysfs_read(-1, md->devnm, GET_VERSION);
+
 			if (sra)
 				sysfs_uevent(sra, "change");
 			sysfs_free(sra);
