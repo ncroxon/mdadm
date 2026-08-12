@@ -29,13 +29,29 @@
 #define MAX_SB_SIZE 4096
 /* bitmap super size is 256, but we round up to a sector for alignment */
 #define BM_SUPER_SIZE 512
-#define MAX_DEVS ((int)(MAX_SB_SIZE - sizeof(struct mdp_superblock_1)) / 2)
+#define DEV_ROLE_ALIGN 256
+#define MAX_DEVS ((int)((MAX_SB_SIZE - sizeof(struct mdp_superblock_1)) \
+			 / 2) & ~(DEV_ROLE_ALIGN - 1))
 #define SUPER1_SIZE	(MAX_SB_SIZE + BM_SUPER_SIZE \
 			 + sizeof(struct misc_dev_info))
 
 struct misc_dev_info {
 	__u64 device_size;
 };
+
+static unsigned int sb_max_dev(const struct mdp_superblock_1 *sb)
+{
+	unsigned int max_dev = __le32_to_cpu(sb->max_dev);
+
+	return max_dev > MAX_DEVS ? MAX_DEVS : max_dev;
+}
+
+static unsigned int sb_max_dev_aligned(unsigned int max_dev)
+{
+	if (max_dev > MAX_DEVS)
+		max_dev = MAX_DEVS;
+	return (max_dev + DEV_ROLE_ALIGN - 1) & ~(DEV_ROLE_ALIGN - 1);
+}
 
 #define MULTIPLE_PPL_AREA_SIZE_SUPER1 (1024 * 1024) /* Size of the whole
 						     * mutliple PPL area
@@ -47,7 +63,7 @@ static int role_from_sb(struct mdp_superblock_1 *sb)
 	int role;
 
 	d = __le32_to_cpu(sb->dev_number);
-	if (d < __le32_to_cpu(sb->max_dev))
+	if (d < sb_max_dev(sb))
 		role = __le16_to_cpu(sb->dev_roles[d]);
 	else
 		role = MD_DISK_ROLE_SPARE;
@@ -73,7 +89,8 @@ static unsigned int calc_sb_1_csum(struct mdp_superblock_1 * sb)
 {
 	unsigned int disk_csum, csum;
 	unsigned long long newcsum;
-	int size = sizeof(*sb) + __le32_to_cpu(sb->max_dev)*2;
+	unsigned int max_dev = sb_max_dev(sb);
+	int size = sizeof(*sb) + max_dev * 2;
 	unsigned int *isuper = (unsigned int *)sb;
 
 /* make sure I can count... */
@@ -223,6 +240,7 @@ static void examine_super1(struct supertype *st, char *homehost)
 	struct mdinfo info;
 	int inconsistent = 0;
 	unsigned int expected_csum = 0;
+	unsigned int max_dev = sb_max_dev(sb);
 
 	expected_csum = calc_sb_1_csum(sb);
 
@@ -471,7 +489,7 @@ static void examine_super1(struct supertype *st, char *homehost)
 	}
 	printf(" ('A' == active, '.' == missing, 'R' == replacing)");
 	printf("\n");
-	for (d = 0; d < __le32_to_cpu(sb->max_dev); d++) {
+	for (d = 0; d < max_dev; d++) {
 		unsigned int r = __le16_to_cpu(sb->dev_roles[d]);
 		if (r <= MD_DISK_ROLE_MAX &&
 		    r > __le32_to_cpu(sb->raid_disks) + delta_extra)
@@ -479,7 +497,7 @@ static void examine_super1(struct supertype *st, char *homehost)
 	}
 	if (inconsistent) {
 		printf("WARNING Array state is inconsistent - each number should appear only once\n");
-		for (d = 0; d < __le32_to_cpu(sb->max_dev); d++)
+		for (d = 0; d < sb_max_dev(sb); d++)
 			if (__le16_to_cpu(sb->dev_roles[d]) >=
 			    MD_DISK_ROLE_FAULTY)
 				printf(" %d:-", d);
@@ -1192,8 +1210,13 @@ static int update_super1(struct supertype *st, struct mdinfo *info,
 			return -2;
 		sb->dev_number = __cpu_to_le32(i);
 
-		if (i == max)
-			sb->max_dev = __cpu_to_le32(max + 1);
+		if (i == max) {
+			int new_max = sb_max_dev_aligned(max + 1);
+
+			if (new_max > MAX_DEVS)
+				return -2;
+			sb->max_dev = __cpu_to_le32(new_max);
+		}
 		if (i > max)
 			return -2;
 
@@ -1228,8 +1251,13 @@ static int update_super1(struct supertype *st, struct mdinfo *info,
 			return -2;
 		if (i > max)
 			return -2;
-		if (i == max)
-			sb->max_dev = __cpu_to_le32(max + 1);
+		if (i == max) {
+			int new_max = sb_max_dev_aligned(max + 1);
+
+			if (new_max > MAX_DEVS)
+				return -2;
+			sb->max_dev = __cpu_to_le32(new_max);
+		}
 		sb->raid_disks = __cpu_to_le32(info->array.raid_disks);
 		sb->dev_roles[info->disk.number] =
 			__cpu_to_le16(info->disk.raid_disk);
@@ -1626,8 +1654,13 @@ static int add_to_super1(struct supertype *st, mdu_disk_info_t *dk,
 		*rp = MD_DISK_ROLE_FAULTY;
 
 	if (dk->number >= (int)__le32_to_cpu(sb->max_dev) &&
-	    __le32_to_cpu(sb->max_dev) < MAX_DEVS)
-		sb->max_dev = __cpu_to_le32(dk->number + 1);
+		__le32_to_cpu(sb->max_dev) < MAX_DEVS) {
+		unsigned int new_max = sb_max_dev_aligned(dk->number + 1);
+
+		if (new_max > MAX_DEVS)
+			new_max = MAX_DEVS;
+		sb->max_dev = __cpu_to_le32(new_max);
+	}
 
 	sb->dev_number = __cpu_to_le32(dk->number);
 	sb->devflags = 0; /* don't copy another disks flags */
