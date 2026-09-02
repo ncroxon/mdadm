@@ -737,6 +737,10 @@ by the
 .B \-\-nodes
 parameter and are stored internally.
 
+.B lockless
+- experimental md\-native lockless bitmap, stored internally. Only supported when creating an
+array with 1.2 metadata.
+
 .B none
 - create array with no bitmap or remove any present bitmap (grow mode).
 

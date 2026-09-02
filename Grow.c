@@ -297,6 +297,8 @@ int Grow_addbitmap(char *devname, int fd, struct context *c, struct shape *s)
 
 	if (s->btype == BitmapCluster)
 		major = BITMAP_MAJOR_CLUSTERED;
+	else if (s->btype == BitmapLockless)
+		major = BITMAP_MAJOR_LOCKLESS;
 
 	if (md_get_array_info(fd, &array) != 0) {
 		pr_err("cannot get array status for %s\n", devname);

@@ -80,7 +80,7 @@ static mdadm_status_t set_bitmap_value(struct shape *s, struct context *c, char 
 		return MDADM_STATUS_ERROR;
 	}
 
-	pr_err("--bitmap value must be 'internal', 'clustered' or 'none'\n");
+	pr_err("--bitmap value must be 'internal', 'clustered', 'lockless' or 'none'\n");
 	pr_err("Current value is \"%s\"\n", val);
 	return MDADM_STATUS_ERROR;
 }
