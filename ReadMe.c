@@ -109,6 +109,7 @@ struct option long_options[] = {
 	{"update-subarray", 1, 0, UpdateSubarray},
 	{"udev-rules", 2, 0, UdevRules},
 	{"offroot", 0, 0, OffRootOpt},
+	{"udev", 0, 0, Udev},
 	{"examine-badblocks", 0, 0, ExamineBB},
 
 	{"dump", 1, 0, Dump},
@@ -310,8 +311,9 @@ char Help_create[] =
 " other levels.\n"
 "\n"
 " Options that are valid with --create (-C) are:\n"
-"  --bitmap=          -b : Create a bitmap for the array with the given filename\n"
-"                        : or an internal bitmap if 'internal' is given\n"
+"  --bitmap=          -b : Create a write-intent bitmap. Value must be one of\n"
+"                        : 'internal', 'clustered', 'lockless' or 'none'\n"
+"                        : ('lockless' is experimental).\n"
 "  --chunk=           -c : chunk size in kibibytes\n"
 "  --rounding=           : rounding factor for linear array (==chunk size)\n"
 "  --level=           -l : raid level: 0,1,4,5,6,10,linear,multipath and synonyms\n"
@@ -555,6 +557,8 @@ char Help_incr[] =
 "                   : required number of devices, but are not yet started.\n"
 "  --fail        -f : First fail (if needed) and then remove device from\n"
 "                   : any array that it is a member of.\n"
+"  --udev           : Indicate that mdadm is run from a udev rule, not intended\n"
+"                   : for command line use.\n"
 ;
 
 char Help_config[] =

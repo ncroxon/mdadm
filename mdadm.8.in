@@ -737,6 +737,10 @@ by the
 .B \-\-nodes
 parameter and are stored internally.
 
+.B lockless
+- experimental md\-native lockless bitmap, stored internally. Only supported when creating an
+array with 1.2 metadata.
+
 .B none
 - create array with no bitmap or remove any present bitmap (grow mode).
 
@@ -1744,6 +1748,30 @@ automatically replaced by a new device without metadata if it appears
 at specified path.   This option is normally only set by an
 .I udev
 script.
+
+.TP
+.BR \-\-udev
+Indicate that mdadm is being run from a
+.I udev
+rule and should not be used in regular cases.
+
+With this option
+.I mdadm
+expects that it is invoked from
+.I udev
+context and some properties handled by udev might not be yet set.
+.I mdadm
+looks for
+.I udev
+context specific environment variables to process action.
+
+Currently,
+.I mdadm
+additionally reads the
+.B DEVLINKS
+variable to determine the
+.I /dev/disk/by-path
+names, which may not have been created on the filesystem yet.
 
 .SH For Monitor mode:
 .TP

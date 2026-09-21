@@ -297,6 +297,8 @@ int Grow_addbitmap(char *devname, int fd, struct context *c, struct shape *s)
 
 	if (s->btype == BitmapCluster)
 		major = BITMAP_MAJOR_CLUSTERED;
+	else if (s->btype == BitmapLockless)
+		major = BITMAP_MAJOR_LOCKLESS;
 
 	if (md_get_array_info(fd, &array) != 0) {
 		pr_err("cannot get array status for %s\n", devname);
@@ -910,13 +912,16 @@ static int subarray_set_num(char *container, struct mdinfo *sra, char *name, int
 int start_reshape(struct mdinfo *sra, int already_running,
 		  int before_data_disks, int data_disks, struct supertype *st)
 {
-	int err;
+	int err = 0;
 	unsigned long long sync_max_to_set;
 
-	sysfs_set_num(sra, NULL, "suspend_lo", 0x7FFFFFFFFFFFFFFFULL);
-	err = sysfs_set_num(sra, NULL, "suspend_hi", sra->reshape_progress);
-	err = err ?: sysfs_set_num(sra, NULL, "suspend_lo",
-				   sra->reshape_progress);
+	if (!already_running) {
+		sysfs_set_num(sra, NULL, "suspend_lo", 0x7FFFFFFFFFFFFFFFULL);
+		err = sysfs_set_num(sra, NULL, "suspend_hi",
+				    sra->reshape_progress);
+		err = err ?: sysfs_set_num(sra, NULL, "suspend_lo",
+					   sra->reshape_progress);
+	}
 	if (before_data_disks <= data_disks)
 		sync_max_to_set = sra->reshape_progress / data_disks;
 	else
@@ -926,10 +931,7 @@ int start_reshape(struct mdinfo *sra, int already_running,
 	if (!already_running)
 		sysfs_set_num(sra, NULL, "sync_min", sync_max_to_set);
 
-        if (st->ss->external)
-		err = err ?: sysfs_set_num(sra, NULL, "sync_max", sync_max_to_set);
-	else
-		err = err ?: sysfs_set_str(sra, NULL, "sync_max", "max");
+	err = err ?: sysfs_set_num(sra, NULL, "sync_max", sync_max_to_set);
 
 	if (!already_running && err == 0) {
 		int cnt = 5;
@@ -1121,6 +1123,16 @@ release:
 	return d;
 }
 
+static void remove_backup_link(char *sys_name)
+{
+	char *backup_link = make_backup(sys_name);
+	struct stat stb;
+
+	if (lstat(backup_link, &stb) == 0 && S_ISLNK(stb.st_mode))
+		unlink(backup_link);
+	free(backup_link);
+}
+
 int reshape_open_backup_file(char *backup_file,
 			     int fd,
 			     char *devname,
@@ -1165,26 +1177,56 @@ int reshape_open_backup_file(char *backup_file,
 		if (write(*fdlist, buf, 512) != 512) {
 			pr_err("%s: cannot create backup file %s: %s\n",
 				devname, backup_file, strerror(errno));
-			return 0;
+			goto error;
 		}
 	}
 	if (fsync(*fdlist) != 0) {
 		pr_err("%s: cannot create backup file %s: %s\n",
 			devname, backup_file, strerror(errno));
-		return 0;
+		goto error;
 	}
 
-	if (!restart && strncmp(backup_file, MAP_DIR, strlen(MAP_DIR)) != 0) {
+	if (!restart &&
+	    strncmp(backup_file, BACKUP_DIR, strlen(BACKUP_DIR)) != 0) {
 		char *bu = make_backup(sys_name);
-		if (symlink(backup_file, bu))
-			pr_err("Recording backup file in " MAP_DIR " failed: %s\n",
-			       strerror(errno));
+		char *target = backup_file;
+		char *resolved = NULL;
+		char *tmp;
+		int err;
+
+		if (mkdir(BACKUP_DIR, 0755) && errno != EEXIST) {
+			pr_err("Creating backup directory " BACKUP_DIR
+			       " failed: %s\n", strerror(errno));
+			free(bu);
+			goto error;
+		}
+		if (backup_file[0] != '/') {
+			resolved = realpath(backup_file, NULL);
+			if (resolved)
+				target = resolved;
+		}
+		xasprintf(&tmp, "%s.new-%d", bu, getpid());
+		if (symlink(target, tmp) || rename(tmp, bu)) {
+			err = errno;
+			unlink(tmp);
+			pr_err("Recording backup file in " BACKUP_DIR " failed: %s\n",
+			       strerror(err));
+			free(tmp);
+			free(resolved);
+			free(bu);
+			goto error;
+		}
+		free(tmp);
+		free(resolved);
 		free(bu);
 	}
 
 	return 1;
 error:
 	close(*fdlist);
+	*fdlist = -1;
+	if (!restart)
+		unlink(backup_file);
 	return 0;
 }
 
@@ -2829,6 +2871,8 @@ static int impose_reshape(struct mdinfo *sra,
 	sra->new_chunk = info->new_chunk;
 
 	if (restart) {
+		unsigned long long reshape_position;
+
 		/* for external metadata checkpoint saved by mdmon can be lost
 		 * or missed /due to e.g. crash/. Check if md is not during
 		 * restart farther than metadata points to.
@@ -2836,6 +2880,14 @@ static int impose_reshape(struct mdinfo *sra,
 		 */
 		if (st->ss->external)
 			verify_reshape_position(info, reshape->level);
+		else if (reshape->backup_blocks &&
+			 sysfs_get_ll(sra, NULL, "reshape_position",
+				      &reshape_position) == 0) {
+			if (info->reshape_progress != reshape_position)
+				dprintf("Corrected reshape progress: %llu -> %llu\n",
+					info->reshape_progress, reshape_position);
+			info->reshape_progress = reshape_position;
+		}
 		sra->reshape_progress = info->reshape_progress;
 	} else {
 		sra->reshape_progress = 0;
@@ -3021,6 +3073,16 @@ static mdadm_status_t handle_forking(bool forked, char *devname)
 
 }
 
+static bool reshape_is_complete(struct mdinfo *info)
+{
+	char buf[SYSFS_MAX_BUF_SIZE];
+
+	if (sysfs_get_str(info, NULL, "reshape_position", buf, sizeof(buf)) < 0)
+		return false;
+
+	return str_is_none(buf);
+}
+
 static int reshape_array(char *container, int fd, char *devname,
 			 struct supertype *st, struct mdinfo *info,
 			 int force, struct mddev_dev *devlist,
@@ -3049,9 +3111,12 @@ static int reshape_array(char *container, int fd, char *devname,
 	unsigned long blocks;
 	unsigned long long array_size;
 	int done;
+	int *backup_fdp = NULL;
 	struct mdinfo *sra = NULL;
 	char buf[SYSFS_MAX_BUF_SIZE];
 	bool located_backup = false;
+	bool backup_created = false;
+	bool reshape_started = false;
 
 	/* when reshaping a RAID0, the component_size might be zero.
 	 * So try to fix that up.
@@ -3364,6 +3429,8 @@ static int reshape_array(char *container, int fd, char *devname,
 			devname);
 		goto release;
 	}
+	if (!info->reshape_active)
+		remove_backup_link(sra->sys_name);
 
 	if (!backup_file)
 		switch(set_new_data_offset(sra, st, devname,
@@ -3483,6 +3550,8 @@ started:
 						      sra->sys_name, restart)) {
 				goto release;
 			}
+			backup_created = !restart;
+			backup_fdp = fdlist + d;
 			d++;
 		}
 	}
@@ -3508,6 +3577,7 @@ started:
 		       restart ? "continue" : "start", devname);
 		goto release;
 	}
+	reshape_started = true;
 	if (restart)
 		sysfs_set_str(sra, NULL, "array_state", "active");
 
@@ -3668,6 +3738,12 @@ out:
 	exit(0);
 
 release:
+	if (backup_created && !reshape_started) {
+		close_fd(backup_fdp);
+		unlink(backup_file);
+		if (sra)
+			remove_backup_link(sra->sys_name);
+	}
 	if (located_backup)
 		free(backup_file);
 	free(fdlist);
@@ -3890,8 +3966,9 @@ int progress_reshape(struct mdinfo *info, struct reshape *reshape,
 	 *   passes this point, progress_reshape should return.  It might
 	 *   return earlier if it determines that ->reshape_progress needs
 	 *   to be updated or further backup is needed.
-	 * - suspend_point is maintained by progress_reshape and the caller
-	 *   should not touch it except to initialise to zero.
+	 * - suspend_point is maintained by progress_reshape.  For native metadata,
+	 *   child_monitor() updates it immediately before backing up a suspended
+	 *   region.
 	 *   It is an array address and it only increases in 2.6.37 and earlier.
 	 *   This makes it difficult to handle reducing reshapes with
 	 *   external metadata.
@@ -4007,8 +4084,8 @@ int progress_reshape(struct mdinfo *info, struct reshape *reshape,
 
 	/* For externally managed metadata we always need to suspend IO to
 	 * the area being reshaped so we regularly push suspend_point forward.
-	 * For native metadata we only need the suspend if we are going to do
-	 * a backup.
+	 * child_monitor() suspends native metadata only when it is ready to
+	 * back up the critical section.
 	 */
 	if (advancing) {
 		if ((need_backup > info->reshape_progress ||
@@ -4024,17 +4101,7 @@ int progress_reshape(struct mdinfo *info, struct reshape *reshape,
 			if (max_progress > *suspend_point)
 				max_progress = *suspend_point;
 		}
-	} else {
-		if (info->array.major_version >= 0) {
-			/* Only need to suspend when about to backup */
-			if (info->reshape_progress < need_backup * 2 &&
-			    *suspend_point > 0) {
-				*suspend_point = 0;
-				sysfs_set_num(info, NULL, "suspend_lo", 0);
-				sysfs_set_num(info, NULL, "suspend_hi",
-					      need_backup);
-			}
-		} else {
+		} else if (info->array.major_version < 0) {
 			/* Need to suspend continually */
 			if (info->reshape_progress < *suspend_point)
 				*suspend_point = info->reshape_progress;
@@ -4051,7 +4118,6 @@ int progress_reshape(struct mdinfo *info, struct reshape *reshape,
 			if (max_progress < *suspend_point)
 				max_progress = *suspend_point;
 		}
-	}
 
 	/* now set sync_max to allow that progress. sync_max, like
 	 * sync_completed is a count of sectors written per device, so
@@ -4082,8 +4148,10 @@ int progress_reshape(struct mdinfo *info, struct reshape *reshape,
 		wait_point = info->component_size - wait_point;
 	}
 
-	if (!*frozen)
-		sysfs_set_num(info, NULL, "sync_max", max_progress);
+	if (!*frozen &&
+	    sysfs_set_num(info, NULL, "sync_max", max_progress) < 0 &&
+	    errno == EBUSY && reshape_is_complete(info))
+		return -1;
 
 	/* Now wait.  If we have already reached the point that we were
 	 * asked to wait to, don't wait at all, else wait for any change.
@@ -4137,10 +4205,13 @@ int progress_reshape(struct mdinfo *info, struct reshape *reshape,
 		unsigned long long reshapep;
 		char action[SYSFS_MAX_BUF_SIZE];
 		if (sysfs_get_str(info, NULL, "sync_action", action, sizeof(action)) > 0 &&
-		    strncmp(action, "idle", 4) == 0 &&
-		    sysfs_get_ll(info, NULL,
-				 "reshape_position", &reshapep) == 0)
-			*reshape_completed = reshapep;
+		    strncmp(action, "idle", 4) == 0) {
+			if (reshape_is_complete(info))
+				return -1;
+			if (sysfs_get_ll(info, NULL,
+					 "reshape_position", &reshapep) == 0)
+				*reshape_completed = reshapep;
+		}
 	} else {
 		/* some kernels can give an incorrectly high
 		 * 'completed' number, so round down */
@@ -4294,6 +4365,19 @@ static int grow_backup(struct mdinfo *sra,
 
 	if (rv)
 		return rv;
+
+	/*
+	 * Make backup data durable before publishing metadata that marks it
+	 * usable after a crash.
+	 */
+	for (i = 0; i < dests; i++) {
+		if (fsync(destfd[i]) != 0) {
+			pr_err("Failed to fsync backup data: %s\n",
+				strerror(errno));
+			return -1;
+		}
+	}
+
 	bsb.mtime = __cpu_to_le64(time(0));
 	for (i = 0; i < dests; i++) {
 		unsigned long long seek = destoffsets[i] + stripes * chunk * odata;
@@ -4318,7 +4402,11 @@ static int grow_backup(struct mdinfo *sra,
 			if (write(destfd[i], &bsb, 512) != 512)
 				break;
 		}
-		fsync(destfd[i]);
+		if (fsync(destfd[i]) != 0) {
+			pr_err("Failed to fsync backup metadata: %s\n",
+				strerror(errno));
+			break;
+		}
 		rv = 0;
 	}
 
@@ -4372,57 +4460,75 @@ static int forget_backup(int dests, int *destfd,
 	return rv;
 }
 
-static void fail(char *msg)
+static int validate_fail(char *msg)
 {
 	int rv;
+
 	rv = (write(2, msg, strlen(msg)) != (int)strlen(msg));
 	rv |= (write(2, "\n", 1) != 1);
-	exit(rv ? 1 : 2);
+	return rv ? 1 : 2;
 }
 
 static char *abuf, *bbuf;
 static unsigned long long abuflen;
-static void validate(int afd, int bfd, unsigned long long offset)
+
+static void validate_free_buffers(void)
+{
+	free(abuf);
+	free(bbuf);
+	abuf = NULL;
+	bbuf = NULL;
+	abuflen = 0;
+}
+
+static int validate_alloc_buffers(unsigned long long len)
+{
+	if (abuflen >= len)
+		return 0;
+
+	validate_free_buffers();
+	abuflen = len;
+	if (posix_memalign((void **)&abuf, 4096, abuflen) ||
+	    posix_memalign((void **)&bbuf, 4096, abuflen)) {
+		validate_free_buffers();
+		return -1;
+	}
+
+	return 0;
+}
+
+static int validate(int afd, int bfd, unsigned long long offset)
 {
 	/* check that the data in the backup against the array.
 	 * This is only used for regression testing and should not
 	 * be used while the array is active
 	 */
 	if (afd < 0)
-		return;
+		return 0;
 	if (lseek(bfd, offset - 4096, 0) < 0) {
 		pr_err("lseek fails %d:%s\n", errno, strerror(errno));
-		return;
+		return validate_fail("cannot seek backup metadata");
 	}
 	if (read(bfd, &bsb2, 512) != 512)
-		fail("cannot read bsb");
+		return validate_fail("cannot read bsb");
 	if (bsb2.sb_csum != bsb_csum((char*)&bsb2,
 				     ((char*)&bsb2.sb_csum)-((char*)&bsb2)))
-		fail("first csum bad");
+		return validate_fail("first csum bad");
 	if (memcmp(bsb2.magic, "md_backup_data", 14) != 0)
-		fail("magic is bad");
+		return validate_fail("magic is bad");
 	if (memcmp(bsb2.magic, "md_backup_data-2", 16) == 0 &&
 	    bsb2.sb_csum2 != bsb_csum((char*)&bsb2,
 				      ((char*)&bsb2.sb_csum2)-((char*)&bsb2)))
-		fail("second csum bad");
+		return validate_fail("second csum bad");
 
 	if (__le64_to_cpu(bsb2.devstart)*512 != offset)
-		fail("devstart is wrong");
+		return validate_fail("devstart is wrong");
 
 	if (bsb2.length) {
 		unsigned long long len = __le64_to_cpu(bsb2.length)*512;
 
-		if (abuflen < len) {
-			free(abuf);
-			free(bbuf);
-			abuflen = len;
-			if (posix_memalign((void**)&abuf, 4096, abuflen) ||
-			    posix_memalign((void**)&bbuf, 4096, abuflen)) {
-				abuflen = 0;
-				/* just stop validating on mem-alloc failure */
-				return;
-			}
-		}
+		if (validate_alloc_buffers(len))
+			return validate_fail("cannot allocate validation buffers");
 
 		if (lseek(bfd, offset, 0) < 0) {
 			pr_err("lseek fails %d:%s\n", errno, strerror(errno));
@@ -4430,7 +4536,7 @@ static void validate(int afd, int bfd, unsigned long long offset)
 		}
 		if ((unsigned long long)read(bfd, bbuf, len) != len) {
 			//printf("len %llu\n", len);
-			fail("read first backup failed");
+			return validate_fail("read first backup failed");
 		}
 
 		if (lseek(afd, __le64_to_cpu(bsb2.arraystart)*512, 0) < 0) {
@@ -4438,40 +4544,33 @@ static void validate(int afd, int bfd, unsigned long long offset)
 			goto out;
 		}
 		if ((unsigned long long)read(afd, abuf, len) != len)
-			fail("read first from array failed");
+			return validate_fail("read first from array failed");
 		if (memcmp(bbuf, abuf, len) != 0)
-			fail("data1 compare failed");
+			return validate_fail("data1 compare failed");
 	}
 	if (bsb2.length2) {
 		unsigned long long len = __le64_to_cpu(bsb2.length2)*512;
 
-		if (abuflen < len) {
-			free(abuf);
-			free(bbuf);
-			abuflen = len;
-			abuf = xmalloc(abuflen);
-			bbuf = xmalloc(abuflen);
-		}
+		if (validate_alloc_buffers(len))
+			return validate_fail("cannot allocate validation buffers");
 
 		if (lseek(bfd, offset+__le64_to_cpu(bsb2.devstart2)*512, 0) < 0) {
 			pr_err("lseek fails %d:%s\n", errno, strerror(errno));
 			goto out;
 		}
 		if ((unsigned long long)read(bfd, bbuf, len) != len)
-			fail("read second backup failed");
+			return validate_fail("read second backup failed");
 		if (lseek(afd, __le64_to_cpu(bsb2.arraystart2)*512, 0) < 0) {
 			pr_err("lseek fails %d:%s\n", errno, strerror(errno));
 			goto out;
 		}
 		if ((unsigned long long)read(afd, abuf, len) != len)
-			fail("read second from array failed");
+			return validate_fail("read second from array failed");
 		if (memcmp(bbuf, abuf, len) != 0)
-			fail("data2 compare failed");
+			return validate_fail("data2 compare failed");
 	}
 out:
-	free(abuf);
-	free(bbuf);
-	return;
+	return 0;
 }
 
 int child_monitor(int afd, struct mdinfo *sra, struct reshape *reshape,
@@ -4544,7 +4643,7 @@ int child_monitor(int afd, struct mdinfo *sra, struct reshape *reshape,
 	if (increasing) {
 		array_size = sra->component_size * reshape->after.data_disks;
 		backup_point = sra->reshape_progress;
-		suspend_point = 0;
+		suspend_point = sra->reshape_progress;
 	} else {
 		array_size = sra->component_size * reshape->before.data_disks;
 		backup_point = reshape->backup_blocks;
@@ -4618,6 +4717,14 @@ int child_monitor(int afd, struct mdinfo *sra, struct reshape *reshape,
 			done = 1;
 			break;
 		}
+		if (rv && !increasing && suspend_point > 0) {
+			dprintf("Suspend [0, %llu) for backup at %llu\n",
+				backup_point, sra->reshape_progress);
+			if (sysfs_set_num(sra, NULL, "suspend_hi", backup_point) ||
+			    sysfs_set_num(sra, NULL, "suspend_lo", 0))
+				goto abort;
+			suspend_point = 0;
+		}
 
 		while (rv) {
 			unsigned long long offset;
@@ -4652,10 +4759,13 @@ int child_monitor(int afd, struct mdinfo *sra, struct reshape *reshape,
 			}
 			if (actual_stripes == 0)
 				break;
-			grow_backup(sra, offset, actual_stripes, fds, offsets,
-				    disks, chunk, level, layout, dests, destfd,
-				    destoffsets, part, &degraded, buf);
-			validate(afd, destfd[0], destoffsets[0]);
+			if (grow_backup(sra, offset, actual_stripes, fds,
+					offsets, disks, chunk, level, layout,
+					dests, destfd, destoffsets, part,
+					&degraded, buf))
+				goto abort;
+			if (validate(afd, destfd[0], destoffsets[0]))
+				goto abort;
 			/* record where 'part' is up to */
 			part = !part;
 			if (increasing)
@@ -4665,13 +4775,24 @@ int child_monitor(int afd, struct mdinfo *sra, struct reshape *reshape,
 		}
 	}
 
+	goto out;
+abort:
+	done = 0;
+out:
 	/* FIXME maybe call progress_reshape one more time instead */
 	/* remove any remaining suspension */
 	sysfs_set_num(sra, NULL, "suspend_lo", 0x7FFFFFFFFFFFFFFFULL);
 	sysfs_set_num(sra, NULL, "suspend_hi", 0);
 	sysfs_set_num(sra, NULL, "suspend_lo", 0);
 	sysfs_set_num(sra, NULL, "sync_min", 0);
+	if (done &&
+	    sysfs_set_str(sra, NULL, "sync_max", "max") < 0) {
+		pr_err("%s: failed to reset sync_max after reshape: %s\n",
+		       sra->sys_name, strerror(errno));
+		done = 0;
+	}
 
+	validate_free_buffers();
 	free(buf);
 	return done;
 }
@@ -5247,9 +5368,9 @@ char *make_backup(char *name)
 	int len;
 	char *fname;
 
-	len = strlen(MAP_DIR) + 1 + strlen(base) + strlen(name)+1;
+	len = strlen(BACKUP_DIR) + 1 + strlen(base) + strlen(name) + 1;
 	fname = xmalloc(len);
-	sprintf(fname, "%s/%s%s", MAP_DIR, base, name);
+	sprintf(fname, "%s/%s%s", BACKUP_DIR, base, name);
 	return fname;
 }
 

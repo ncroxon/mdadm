@@ -473,6 +473,7 @@ enum special_options {
 	UdevRules,
 	Continue,
 	OffRootOpt,
+	Udev,
 	Prefer,
 	KillOpt,
 	DataOffset,
@@ -1367,6 +1368,7 @@ extern void policyline(char *line, char *type);
 extern void policy_add(char *type, ...);
 extern void policy_free(void);
 
+extern void policy_use_udev(void);
 extern struct dev_policy *path_policy(char **paths, char *type);
 extern struct dev_policy *disk_policy(struct mdinfo *disk);
 extern struct dev_policy *devid_policy(int devid);
@@ -1528,7 +1530,7 @@ extern int parse_layout_10(char *layout);
 extern int parse_layout_faulty(char *layout);
 extern int parse_num(int *dest, const char *num);
 extern int parse_cluster_confirm_arg(char *inp, char **devname, int *slot);
-extern int check_ext2(int fd, char *name);
+extern bool check_ext2(int fd, char *name);
 extern int check_reiser(int fd, char *name);
 extern int check_raid(int fd, char *name);
 extern int check_partitions(int fd, char *dname,

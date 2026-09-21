@@ -194,24 +194,42 @@ is_raid_foreign() {
 }
 
 record_selinux() {
-	sys_selinux=`getenforce`
-	setenforce Permissive
+	if command -v getenforce > /dev/null && command -v setenforce > /dev/null
+	then
+		sys_selinux=`getenforce`
+		[ "$sys_selinux" != "Disabled" ] && setenforce Permissive
+	else
+		sys_selinux=
+	fi
 }
 
 restore_selinux() {
-	setenforce $sys_selinux
+	[ -n "$sys_selinux" ] &&
+	[ "$sys_selinux" != "Disabled" ] &&
+	command -v setenforce > /dev/null &&
+		setenforce $sys_selinux
 }
 
 wait_for_reshape_end() {
 	# wait for grow-continue to finish but break if sync_action does not
 	# contain any reshape value
+	local deadline=0
+
 	while true
 	do
 		sync_action=$(grep -Ec '(resync|recovery|reshape|check|repair) *=' /proc/mdstat)
 		if (( "$sync_action" != 0 )); then
 			sleep 2
+			deadline=0
 			continue
-		elif [[ $(pgrep -f "mdadm --grow --continue" > /dev/null) != "" ]]; then
+		elif pgrep -f '[m]dadm .*(-G|--grow).*(--continue|--backup-file)' > /dev/null; then
+			if (( deadline == 0 )); then
+				deadline=$(($(date +%s) + 30))
+			fi
+			if (( $(date +%s) < deadline )); then
+				sleep 1
+				continue
+			fi
 			echo "Grow continue did not finish but reshape is done" >&2
 			exit 1
 		else
