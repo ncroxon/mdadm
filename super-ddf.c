@@ -4355,11 +4355,34 @@ static int ddf_open_new(struct supertype *c, struct active_array *a, int inst)
 	struct ddf_super *ddf = c->sb;
 	struct mdinfo *dev;
 	struct dl *dl;
+	struct vcl *vcl;
+	mdu_array_info_t array;
 	static const char faulty[] = "faulty";
 
-	if (all_ff(ddf->virt->entries[inst].guid)) {
+	/*
+	 * vcnum is always a valid index into ->virt, so finding the vcl
+	 * also bounds inst.
+	 */
+	for (vcl = ddf->conflist; vcl; vcl = vcl->next)
+		if (vcl->vcnum == (unsigned int)inst)
+			break;
+	if (!vcl || all_ff(ddf->virt->entries[inst].guid)) {
 		pr_err("subarray %d doesn't exist\n", inst);
 		return -ENODEV;
+	}
+	/*
+	 * Our copy of the metadata may be older than the one the array
+	 * was started from.  The slot numbers of the running array are
+	 * used to index the config records, so the geometry must match.
+	 */
+	if ((vcl->conf.sec_elmnt_count > 1 && check_secondary(vcl) != 0) ||
+	    layout_ddf2md(&vcl->conf, &array) != 0 ||
+	    be16_to_cpu(vcl->conf.prim_elmnt_count) > ddf->mppe ||
+	    array.raid_disks <= 0 ||
+	    array.raid_disks != a->info.array.raid_disks ||
+	    array.level != a->info.array.level) {
+		pr_err("subarray %d doesn't match the metadata\n", inst);
+		return -EINVAL;
 	}
 	dprintf("new subarray %d, GUID: %s\n", inst,
 		guid_str(ddf->virt->entries[inst].guid));
