@@ -4097,6 +4097,18 @@ static struct mdinfo *container_content_ddf(struct supertype *st, char *subarray
 				ddf->mppe, &bvd, &iphys);
 			if (i == DDF_NOTFOUND)
 				continue;
+			/*
+			 * The slot is derived from the position in
+			 * phys_refnum[], which is not bounded by the
+			 * element counts the array size comes from.
+			 */
+			if (i >= (unsigned int)this->array.raid_disks) {
+				pr_err("%s: disk %08x has slot %u beyond %d raid disks\n",
+				       this->name,
+				       be32_to_cpu(ddf->phys->entries[pd].refnum),
+				       i, this->array.raid_disks);
+				continue;
+			}
 
 			this->array.working_disks++;
 
