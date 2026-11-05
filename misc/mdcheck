@@ -55,11 +55,15 @@ log() {
 }
 
 # get device name from sysfs
+# The name may be derived from on-disk metadata, so never evaluate it.
 devname() {
-    local dev
-    [[ -f "$1/uevent" ]] && \
-	    dev=$(eval "$(cat "$1/uevent")"; echo -n "$DEVNAME")
-    [[ "$dev" && -b "/dev/$dev" ]] || {
+    local dev= line
+    if [[ -f "$1/uevent" ]]; then
+	while IFS= read -r line || [[ "$line" ]]; do
+	    [[ "$line" == DEVNAME=* ]] && dev=${line#DEVNAME=}
+	done < "$1/uevent"
+    fi
+    [[ "$dev" && "$dev" != */* && -b "/dev/$dev" ]] || {
 	log "failed to read DEVNAME from $1"
 	return 1
     }
@@ -153,15 +157,15 @@ cleanup() {
 
 	if [ -z "$fl" ]; then continue; fi
 
-	if [ "`cat $sys/md/sync_action`" != 'check' ]
+	if [ "`cat "$sys/md/sync_action"`" != 'check' ]
 	then
 	    eval MD_${i}_fl=
-	    rm -f $fl
+	    rm -f "$fl"
 	    continue;
 	fi
-	echo idle > $sys/md/sync_action
-	cat $sys/md/sync_min > $fl
-	log pause checking $dev at `cat $fl`
+	echo idle > "$sys/md/sync_action"
+	cat "$sys/md/sync_min" > "$fl"
+	log pause checking "$dev" at "`cat "$fl"`"
     done
     rm -f "$tmp"
 }
@@ -177,7 +181,7 @@ find /var/lib/mdcheck -name "MD_UUID*" -type f -mtime +180 -exec rm {} \;
 for sync_act in /sys/block/*/md/sync_action
 do
 	[ -e "$sync_act" ] || continue
-	if [ "`cat $sync_act`" != 'idle' ]
+	if [ "`cat "$sync_act"`" != 'idle' ]
 	then # This array is busy
 		continue
 	fi
@@ -205,10 +209,10 @@ do
 	eval MD_${cnt}_fl=\$fl
 	eval MD_${cnt}_sys=\$sys
 	eval MD_${cnt}_dev=\$dev
-	echo $start > $fl
-	echo $start > $sys/md/sync_min
-	echo check > $sys/md/sync_action
-	log checking $dev from $start
+	echo "$start" > "$fl"
+	echo "$start" > "$sys/md/sync_min"
+	echo check > "$sys/md/sync_action"
+	log checking "$dev" from "$start"
 done
 
 if [ -z "$endtime" ]
@@ -227,16 +231,16 @@ do
 
 		if [ -z "$fl" ]; then continue; fi
 
-		if [ "`cat $sys/md/sync_action`" != 'check' ]
+		if [ "`cat "$sys/md/sync_action"`" != 'check' ]
 		then
-			log finished checking $dev
+			log finished checking "$dev"
 			eval MD_${i}_fl=
 			rm -f "$fl"
 			touch "${fl/MD_UUID_/Checked_}"
 			continue;
 		fi
-		read a rest < $sys/md/sync_completed
-		echo $a > $fl
+		read a rest < "$sys/md/sync_completed"
+		echo "$a" > "$fl"
 		any=yes
 	done
 	# mdcheck_continue.timer is started by mdcheck_start.timer.
