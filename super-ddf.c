@@ -4791,8 +4791,8 @@ static void copy_matching_bvd(struct ddf_super *ddf,
 			      struct vd_config *conf,
 			      const struct metadata_update *update)
 {
-	unsigned int mppe =
-		be16_to_cpu(ddf->anchor.max_primary_element_entries);
+	/* ddf->mppe has been validated against conf_rec_len */
+	unsigned int mppe = ddf->mppe;
 	unsigned int len = ddf->conf_rec_len * 512;
 	char *p;
 	struct vd_config *vc;
