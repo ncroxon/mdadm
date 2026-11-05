@@ -624,7 +624,7 @@ struct devs {
 	struct mdinfo i;
 };
 
-static int load_devices(struct devs *devices, char *devmap,
+static int load_devices(struct devs *devices, char *devmap, int devmap_disks,
 			struct mddev_ident *ident, struct supertype **stp,
 			struct mddev_dev *devlist, struct context *c,
 			struct mdinfo *content,
@@ -685,7 +685,11 @@ static int load_devices(struct devs *devices, char *devmap,
 				*stp = st;
 				goto error;
 			}
-			tst->ss->getinfo_super(tst, content, devmap + devcnt * content->array.raid_disks);
+			/* Each member may report its own raid_disks, so
+			 * keep the devmap rows the size they were allocated.
+			 */
+			content->array.raid_disks = devmap_disks;
+			tst->ss->getinfo_super(tst, content, devmap + devcnt * devmap_disks);
 
 			memcpy(content->uuid, ident->uuid, 16);
 			strcpy(content->name, ident->name);
@@ -745,7 +749,11 @@ static int load_devices(struct devs *devices, char *devmap,
 				*stp = st;
 				goto error;
 			}
-			tst->ss->getinfo_super(tst, content, devmap + devcnt * content->array.raid_disks);
+			/* Each member may report its own raid_disks, so
+			 * keep the devmap rows the size they were allocated.
+			 */
+			content->array.raid_disks = devmap_disks;
+			tst->ss->getinfo_super(tst, content, devmap + devcnt * devmap_disks);
 		}
 
 		if (fstat(dfd, &stb) != 0) {
@@ -1375,6 +1383,7 @@ int Assemble(char *mddev, struct mddev_ident *ident,
 			  (ident->container == NULL || ident->member == NULL));
 	struct devs *devices = NULL;
 	char *devmap;
+	int devmap_disks;
 	int *best = NULL; /* indexed by raid_disk */
 	int bestcnt = 0;
 	int devcnt;
@@ -1394,6 +1403,7 @@ int Assemble(char *mddev, struct mddev_ident *ident,
 	struct mdinfo *content = NULL;
 	struct mdinfo *pre_exist = NULL;
 	char *avail;
+	int avail_disks;
 	char *name = NULL;
 	char chosen_name[1024];
 	struct map_ent *map = NULL;
@@ -1597,8 +1607,9 @@ try_again:
 
 	/* Ok, no bad inconsistancy, we can try updating etc */
 	devices = xcalloc(num_devs, sizeof(*devices));
-	devmap = xcalloc(num_devs, content->array.raid_disks);
-	devcnt = load_devices(devices, devmap, ident, &st, devlist,
+	devmap_disks = content->array.raid_disks;
+	devmap = xcalloc(num_devs, devmap_disks);
+	devcnt = load_devices(devices, devmap, devmap_disks, ident, &st, devlist,
 			      c, content, mdfd, mddev,
 			      &most_recent, &bestcnt, &best, inargv);
 	if (devcnt < 0) {
@@ -1629,7 +1640,8 @@ try_again:
 	/* now we have some devices that might be suitable.
 	 * I wonder how many
 	 */
-	avail = xcalloc(content->array.raid_disks, 1);
+	avail_disks = content->array.raid_disks;
+	avail = xcalloc(avail_disks, 1);
 	okcnt = 0;
 	sparecnt=0;
 	journalcnt=0;
@@ -1662,10 +1674,10 @@ try_again:
 		 * we must reject this device.
 		 */
 		if (j != most_recent && !c->force &&
-		    content->array.raid_disks > 0 &&
+		    devmap_disks > 0 &&
 		    devices[most_recent].i.disk.raid_disk >= 0 &&
-		    devices[most_recent].i.disk.raid_disk < content->array.raid_disks &&
-		    devmap[j * content->array.raid_disks + devices[most_recent].i.disk.raid_disk] == 0) {
+		    devices[most_recent].i.disk.raid_disk < devmap_disks &&
+		    devmap[j * devmap_disks + devices[most_recent].i.disk.raid_disk] == 0) {
 			if (c->verbose > -1)
 				pr_err("ignoring %s as it reports %s as failed\n",
 				       devices[j].devname, devices[most_recent].devname);
@@ -1748,6 +1760,16 @@ try_again:
 		goto out;
 	}
 	st->ss->getinfo_super(st, content, NULL);
+	if (content->array.raid_disks > avail_disks) {
+		/* The chosen superblock reports more devices than the
+		 * one avail[] was sized from; enough() reads
+		 * raid_disks entries, so extend it.
+		 */
+		avail = xrealloc(avail, content->array.raid_disks);
+		memset(avail + avail_disks, 0,
+		       content->array.raid_disks - avail_disks);
+		avail_disks = content->array.raid_disks;
+	}
 	if (sysfs_init(content, mdfd, NULL)) {
 		pr_err("Unable to initialize sysfs\n");
 		free(avail);
