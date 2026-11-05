@@ -3289,9 +3289,8 @@ static int __write_ddf_structure(struct dl *d, struct ddf_super *ddf, __u8 type)
 		struct vcl *c;
 		struct vd_config *vdc = NULL;
 		if (i == n_config) {
-			c = (struct vcl *)d->spare;
-			if (c)
-				vdc = &c->conf;
+			/* dl->spare is a bare record, not a struct vcl */
+			vdc = (struct vd_config *)d->spare;
 		} else {
 			unsigned int dummy;
 			c = d->vlist[i];
