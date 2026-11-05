@@ -242,6 +242,14 @@ int create_mddev(char *dev, char *name, int trustworthy,
 			case '\t':
 				*cp = '_';
 				break;
+			default:
+				/* The name comes from metadata and is
+				 * exported to udev and the map file, one
+				 * KEY=value per line.
+				 */
+				if (iscntrl((unsigned char)*cp))
+					*cp = '_';
+				break;
 			}
 
 		if (trustworthy == LOCAL ||

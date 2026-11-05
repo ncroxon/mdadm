@@ -26,6 +26,8 @@
 #include "mdadm.h"
 #include "xmalloc.h"
 
+#include <ctype.h>
+
 #define MAX_SB_SIZE 4096
 /* bitmap super size is 256, but we round up to a sector for alignment */
 #define BM_SUPER_SIZE 512
@@ -546,7 +548,7 @@ static void export_examine_super1(struct supertype *st)
 	printf("MD_LEVEL=%s\n", map_num_s(pers, __le32_to_cpu(sb->level)));
 	printf("MD_DEVICES=%d\n", __le32_to_cpu(sb->raid_disks));
 	for (i = 0; i < 32; i++)
-		if (sb->set_name[i] == '\n' || sb->set_name[i] == '\0') {
+		if (iscntrl((unsigned char)sb->set_name[i])) {
 			len = i;
 			break;
 		}
@@ -774,7 +776,7 @@ static void export_detail_super1(struct supertype *st)
 	int len = 32;
 
 	for (i = 0; i < 32; i++)
-		if (sb->set_name[i] == '\n' || sb->set_name[i] == '\0') {
+		if (iscntrl((unsigned char)sb->set_name[i])) {
 			len = i;
 			break;
 		}
