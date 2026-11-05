@@ -436,6 +436,25 @@ static void set_migr_type(struct imsm_dev *dev, __u8 migr_type)
 	}
 }
 
+/* metadata and migration record buffers are sized for MAX_SECTOR_SIZE */
+static int imsm_get_sector_size(int fd, char *dname, unsigned int *sectsizep)
+{
+	unsigned int sectsize;
+
+	if (!get_dev_sector_size(fd, dname, &sectsize))
+		return 0;
+
+	if (sectsize > MAX_SECTOR_SIZE) {
+		if (dname)
+			pr_err("Sector size %u of %s is not supported by imsm\n",
+			       sectsize, dname);
+		return 0;
+	}
+
+	*sectsizep = sectsize;
+	return 1;
+}
+
 static unsigned int sector_count(__u32 bytes, unsigned int sector_size)
 {
 	return ROUND_UP(bytes, sector_size) / sector_size;
@@ -5448,7 +5467,7 @@ static int get_super_block(struct intel_super **super_list, char *devnm, char *d
 		goto error;
 	}
 
-	if (!get_dev_sector_size(dfd, NULL, &s->sector_size)) {
+	if (!imsm_get_sector_size(dfd, NULL, &s->sector_size)) {
 		err = 2;
 		goto error;
 	}
@@ -5532,7 +5551,7 @@ static int load_super_imsm(struct supertype *st, int fd, char *devname)
 	if (!super)
 		return 1;
 
-	if (!get_dev_sector_size(fd, NULL, &super->sector_size)) {
+	if (!imsm_get_sector_size(fd, NULL, &super->sector_size)) {
 		free_imsm(super);
 		return 1;
 	}
@@ -5953,7 +5972,7 @@ static int drive_validate_sector_size(struct intel_super *super, struct dl *dl)
 		return 0;
 	}
 
-	if (!get_dev_sector_size(dl->fd, dl->devname, &member_sector_size))
+	if (!imsm_get_sector_size(dl->fd, dl->devname, &member_sector_size))
 		return 0;
 	if (member_sector_size != super->sector_size)
 		return 0;
@@ -6011,8 +6030,8 @@ static int add_to_super_imsm_volume(struct supertype *st, mdu_disk_info_t *dk,
 	}
 
 	if (mpb->num_disks == 0)
-		if (!get_dev_sector_size(dl->fd, dl->devname,
-					 &super->sector_size))
+		if (!imsm_get_sector_size(dl->fd, dl->devname,
+					  &super->sector_size))
 			return 1;
 
 	if (!drive_validate_sector_size(super, dl)) {
@@ -6205,7 +6224,7 @@ static int add_to_super_imsm(struct supertype *st, mdu_disk_info_t *dk,
 		}
 	}
 
-	if (!get_dev_size(fd, NULL, &size) || !get_dev_sector_size(fd, NULL, &member_sector_size))
+	if (!get_dev_size(fd, NULL, &size) || !imsm_get_sector_size(fd, NULL, &member_sector_size))
 		goto error;
 
 	if (super->sector_size == 0)
@@ -6900,7 +6919,7 @@ static int validate_geometry_imsm_container(struct supertype *st, int level,
 	if (!super)
 		goto exit;
 
-	if (!get_dev_sector_size(fd, NULL, &super->sector_size))
+	if (!imsm_get_sector_size(fd, NULL, &super->sector_size))
 		goto exit;
 
 	rv = find_intel_hba_capability(fd, super, verbose > 0 ? dev : NULL);
@@ -9132,7 +9151,7 @@ static int store_imsm_mpb(int fd, struct imsm_super *mpb)
 	unsigned long long sectors;
 	unsigned int sector_size;
 
-	if (!get_dev_sector_size(fd, NULL, &sector_size))
+	if (!imsm_get_sector_size(fd, NULL, &sector_size))
 		return 1;
 	get_dev_size(fd, NULL, &dsize);
 
