@@ -67,6 +67,11 @@ static void examine_gpt(struct supertype *st, char *homehost)
 	}
 }
 
+/* Room for the MBR, the GPT header and the partition entries */
+#define GPT_MAX_PARTS	128
+#define GPT_SB_SIZE	(sizeof(struct MBR) + sizeof(struct GPT) + \
+			 GPT_MAX_PARTS * sizeof(struct GPT_part_entry))
+
 static int load_gpt(struct supertype *st, int fd, char *devname)
 {
 	struct MBR *super;
@@ -76,7 +81,7 @@ static int load_gpt(struct supertype *st, int fd, char *devname)
 
 	free_gpt(st);
 
-	if (posix_memalign((void**)&super, 4096, 32*512) != 0) {
+	if (posix_memalign((void**)&super, 4096, GPT_SB_SIZE) != 0) {
 		pr_err("could not allocate superblock\n");
 		return 1;
 	}
@@ -114,7 +119,7 @@ static int load_gpt(struct supertype *st, int fd, char *devname)
 		goto no_read;
 	if (gpt_head->magic != GPT_SIGNATURE_MAGIC)
 		goto not_found;
-	if (__le32_to_cpu(gpt_head->part_cnt) >= 128)
+	if (__le32_to_cpu(gpt_head->part_cnt) >= GPT_MAX_PARTS)
 		goto not_found;
 
 	to_read = __le32_to_cpu(gpt_head->part_cnt) * sizeof(struct GPT_part_entry);
