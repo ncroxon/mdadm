@@ -4224,6 +4224,21 @@ static int compare_super_ddf(struct supertype *st, struct supertype *tst,
 	}
 
 	/*
+	 * The objects merged below were sized from second's header but are
+	 * copied and walked using first's record sizes.
+	 */
+	if (first->conf_rec_len != second->conf_rec_len ||
+	    first->max_part != second->max_part ||
+	    first->mppe != second->mppe) {
+		if (verbose)
+			pr_err("DDF record sizes differ (%u/%u/%u vs %u/%u/%u)\n",
+			       first->conf_rec_len, first->max_part,
+			       first->mppe, second->conf_rec_len,
+			       second->max_part, second->mppe);
+		return 3;
+	}
+
+	/*
 	 * At this point we are fairly sure that the meta data matches.
 	 * But the new disk may contain additional local data.
 	 * Add it to the super block.
