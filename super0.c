@@ -234,7 +234,8 @@ static void examine_super0(struct supertype *st, char *homehost)
 	printf("\n");
 	printf("      Number   Major   Minor   RaidDevice State\n");
 	for (d = -1;
-	     d < (signed int)(sb->raid_disks + delta_extra + sb->spare_disks);
+	     d < (signed int)(sb->raid_disks + delta_extra + sb->spare_disks) &&
+	     d < MD_SB_DISKS;
 	     d++) {
 		mdp_disk_t *dp;
 		char *dv;
