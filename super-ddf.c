@@ -1322,8 +1322,19 @@ static int load_ddf_local(int fd, struct ddf_super *super,
 		struct vcl *vcl;
 
 		if (be32_eq(vd->magic, DDF_SPARE_ASSIGN_MAGIC)) {
+			struct spare_assign *sa = (struct spare_assign *)vd;
+			unsigned int populated = be16_to_cpu(sa->populated);
+
 			if (dl->spare)
 				continue;
+			if (ddf_safe_entry_count(super->conf_rec_len * 512,
+						 sizeof(*sa),
+						 sizeof(sa->spare_ents[0]),
+						 populated) != populated) {
+				pr_err("ddf: ignoring spare assignment record with %u entries\n",
+				       populated);
+				continue;
+			}
 			if (posix_memalign((void**)&dl->spare, 512,
 					   super->conf_rec_len*512) != 0) {
 				pr_err("could not allocate spare info buf\n");
