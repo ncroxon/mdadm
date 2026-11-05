@@ -6671,6 +6671,14 @@ static int validate_ppl_imsm(struct supertype *st, struct mdinfo *info,
 			break;
 		}
 
+		if (__le32_to_cpu(ppl_hdr->entries_count) >
+		    PPL_HDR_MAX_ENTRIES) {
+			dprintf("Wrong PPL header entries count on %s\n",
+				d->devname);
+			ret = 1;
+			break;
+		}
+
 		ret = 0;
 		prev_gen_num = __le64_to_cpu(ppl_hdr->generation);
 
