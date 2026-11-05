@@ -4802,8 +4802,9 @@ out:
  * write that data into the array and update the super blocks with
  * the new reshape_progress
  */
-int Grow_restart(struct supertype *st, struct mdinfo *info, int *fdlist,
-		 int cnt, char *backup_file, int verbose)
+static int grow_restart_fds(struct supertype *st, struct mdinfo *info,
+			    int *fdlist, int cnt, char *backup_file,
+			    int verbose)
 {
 	int i, j;
 	int old_disks;
@@ -4821,11 +4822,15 @@ int Grow_restart(struct supertype *st, struct mdinfo *info, int *fdlist,
 
 	old_disks = info->array.raid_disks - info->delta_disks;
 
-	if (info->delta_disks <= 0)
+	if (info->delta_disks <= 0) {
 		/* Didn't grow, so the backup file must have
 		 * been used
 		 */
 		old_disks = cnt;
+	} else if (old_disks < 1) {
+		pr_err("Invalid geometry for reshape restore\n");
+		return 1;
+	}
 
 	if (backup_file) {
 		backup_fd = open(backup_file, O_RDONLY);
@@ -5131,6 +5136,36 @@ int Grow_restart(struct supertype *st, struct mdinfo *info, int *fdlist,
 	if (verbose)
 		pr_err("Failed to find backup of critical section\n");
 	return 1;
+}
+
+int Grow_restart(struct supertype *st, struct mdinfo *info, int *fdlist,
+		 int cnt, char *backup_file, int verbose)
+{
+	int raid_disks = info->array.raid_disks;
+	int *fds = fdlist;
+	int rv;
+	int i;
+
+	if (raid_disks <= 0 || raid_disks > MAX_DISKS) {
+		pr_err("Invalid number of raid disks (%d) for reshape restore\n",
+		       raid_disks);
+		return 1;
+	}
+
+	/* fdlist only has cnt entries, but the restore code indexes it by
+	 * every raid slot, so pad it with -1 for the missing slots.
+	 */
+	if (cnt < raid_disks) {
+		fds = xmalloc(sizeof(*fds) * raid_disks);
+		for (i = 0; i < raid_disks; i++)
+			fds[i] = i < cnt ? fdlist[i] : -1;
+	}
+
+	rv = grow_restart_fds(st, info, fds, cnt, backup_file, verbose);
+
+	if (fds != fdlist)
+		free(fds);
+	return rv;
 }
 
 int Grow_continue_command(char *devname, int fd, struct context *c)
