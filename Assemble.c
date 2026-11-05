@@ -2057,7 +2057,8 @@ int assemble_container_content(struct supertype *st, int mdfd,
 	old_raid_disks = content->array.raid_disks - content->delta_disks;
 	avail = xcalloc(content->array.raid_disks, 1);
 	for (dev = content->devs; dev; dev = dev->next) {
-		if (dev->disk.raid_disk >= 0)
+		if (dev->disk.raid_disk >= 0 &&
+		    dev->disk.raid_disk < content->array.raid_disks)
 			avail[dev->disk.raid_disk] = 1;
 		if (sysfs_add_disk(content, dev, 1) == 0) {
 			if (dev->disk.raid_disk >= old_raid_disks &&
@@ -2098,7 +2099,9 @@ int assemble_container_content(struct supertype *st, int mdfd,
 				pr_err("%s contains invalid PPL - consider --force or --update-subarray with --update=no-ppl\n",
 					chosen_name);
 				content->array.state &= ~1;
-				avail[dev->disk.raid_disk] = 0;
+				if (dev->disk.raid_disk >= 0 &&
+				    dev->disk.raid_disk < content->array.raid_disks)
+					avail[dev->disk.raid_disk] = 0;
 				break;
 			}
 
