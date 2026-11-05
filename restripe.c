@@ -51,6 +51,10 @@ int geo_map(int block, unsigned long long stripe, int raid_disks,
 	    (level == 4))
 		layout = 0;
 
+	/* Don't let an out-of-range layout alias another level's geometry */
+	if (layout < 0 || layout >= 100)
+		return -1;
+
 	switch(level*100 + layout) {
 	case 000:
 	case 400:
@@ -582,7 +586,8 @@ int save_stripes(int *source, unsigned long long *offsets,
 			dnum = geo_map(disk < data_disks ? disk : data_disks - disk - 1,
 				       start/chunk_size/data_disks,
 				       raid_disks, level, layout);
-			if (dnum < 0) abort();
+			if (dnum < 0 || dnum >= raid_disks)
+				abort();
 			if (source[dnum] < 0 ||
 			    lseek(source[dnum], offsets[dnum] + offset, 0) < 0 ||
 			    read(source[dnum], buf+disk * chunk_size,
@@ -765,6 +770,10 @@ int restore_stripes(int *dest, unsigned long long *offsets,
 		for (i = 0; i < data_disks; i++) {
 			int disk = geo_map(i, start/chunk_size/data_disks,
 					   raid_disks, level, layout);
+			if (disk < 0 || disk >= raid_disks) {
+				rv = -2;
+				goto abort;
+			}
 			if (src_buf == NULL) {
 				/* read from file */
 				if (lseek(source, read_offset, 0) !=
@@ -793,6 +802,10 @@ int restore_stripes(int *dest, unsigned long long *offsets,
 		case 5:
 			disk = geo_map(-1, start/chunk_size/data_disks,
 					   raid_disks, level, layout);
+			if (disk < 0 || disk >= raid_disks) {
+				rv = -2;
+				goto abort;
+			}
 			for (i = 0; i < data_disks; i++)
 				blocks[i] = stripes[(disk+1+i) % raid_disks];
 			xor_blocks(stripes[disk], blocks, data_disks, chunk_size);
@@ -802,6 +815,11 @@ int restore_stripes(int *dest, unsigned long long *offsets,
 				       raid_disks, level, layout);
 			qdisk = geo_map(-2, start/chunk_size/data_disks,
 				       raid_disks, level, layout);
+			if (disk < 0 || disk >= raid_disks ||
+			    qdisk < 0 || qdisk >= raid_disks) {
+				rv = -2;
+				goto abort;
+			}
 			if (is_ddf(layout)) {
 				/* q over 'raid_disks' blocks, in device order.
 				 * 'p' and 'q' get to be all zero
