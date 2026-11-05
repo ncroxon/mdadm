@@ -926,7 +926,13 @@ int Manage_add(int fd, int tfd, struct mddev_dev *dv,
 					continue;
 				if (!(disc.state & (1<<MD_DISK_SYNC)))
 					continue;
-				avail[disc.raid_disk] = 1;
+				/* During a reshape to fewer devices, members
+				 * may still be in sync in slots beyond
+				 * raid_disks.
+				 */
+				if (disc.raid_disk >= 0 &&
+				    disc.raid_disk < array->raid_disks)
+					avail[disc.raid_disk] = 1;
 				found++;
 			}
 			array_failed = !enough(array->level, array->raid_disks,
@@ -1342,7 +1348,8 @@ static bool is_remove_safe(mdu_array_info_t *array, const int fd, dev_t devid, c
 	char *avail = xcalloc(array->raid_disks, sizeof(char));
 
 	for (disk = mdi->devs; disk; disk = disk->next) {
-		if (disk->disk.raid_disk < 0)
+		if (disk->disk.raid_disk < 0 ||
+		    disk->disk.raid_disk >= array->raid_disks)
 			continue;
 		if (!(disk->disk.state & (1 << MD_DISK_SYNC)))
 			continue;
