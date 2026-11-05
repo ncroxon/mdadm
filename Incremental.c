@@ -763,8 +763,17 @@ static int count_active(struct supertype *st, struct mdinfo *sra,
 			st->ss->getinfo_super(st, &info, devmap);
 		}
 
-		if (info.disk.state & (1<<MD_DISK_SYNC))
-		{
+		if ((info.disk.state & (1<<MD_DISK_SYNC)) &&
+		    (info.disk.raid_disk < 0 ||
+		     info.disk.raid_disk >= raid_disks)) {
+			/* The slot this device claims does not exist in
+			 * the array, so it cannot be counted as active.
+			 */
+			st->ss->free_super(st);
+			continue;
+		}
+
+		if (info.disk.state & (1<<MD_DISK_SYNC)) {
 			if (cnt == 0) {
 				cnt++;
 				max_events = info.events;

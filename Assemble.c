@@ -805,7 +805,7 @@ static int load_devices(struct devs *devices, char *devmap,
 			    i >= nextspare)
 				nextspare = i+1;
 		}
-		if (i < 10000) {
+		if (i >= 0 && i < 10000) {
 			if (i >= bestcnt) {
 				int newbestcnt = i+10;
 				int *newbest = xmalloc(sizeof(int)*newbestcnt);
@@ -1664,6 +1664,7 @@ try_again:
 		if (j != most_recent && !c->force &&
 		    content->array.raid_disks > 0 &&
 		    devices[most_recent].i.disk.raid_disk >= 0 &&
+		    devices[most_recent].i.disk.raid_disk < content->array.raid_disks &&
 		    devmap[j * content->array.raid_disks + devices[most_recent].i.disk.raid_disk] == 0) {
 			if (c->verbose > -1)
 				pr_err("ignoring %s as it reports %s as failed\n",
