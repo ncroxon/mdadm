@@ -962,14 +962,21 @@ struct imsm_map *get_imsm_map(struct imsm_dev *dev, int second_map)
  */
 static size_t sizeof_imsm_dev(struct imsm_dev *dev, int migr_state)
 {
-	size_t size = sizeof(*dev) - sizeof(struct imsm_map) +
-		      sizeof_imsm_map(get_imsm_map(dev, MAP_0));
+	size_t map0_size = sizeof_imsm_map(get_imsm_map(dev, MAP_0));
+	size_t size = sizeof(*dev) - sizeof(struct imsm_map) + map0_size;
 
 	/* migrating means an additional map */
-	if (dev->vol.migr_state)
-		size += sizeof_imsm_map(get_imsm_map(dev, MAP_1));
-	else if (migr_state)
-		size += sizeof_imsm_map(get_imsm_map(dev, MAP_0));
+	if (dev->vol.migr_state) {
+		size_t map1_size = sizeof_imsm_map(get_imsm_map(dev, MAP_1));
+
+		/* migrate() may replace map[1] with a copy of map[0] */
+		if (migr_state && map0_size > map1_size)
+			size += map0_size;
+		else
+			size += map1_size;
+	} else if (migr_state) {
+		size += map0_size;
+	}
 
 	return size;
 }
