@@ -4326,17 +4326,15 @@ static int compare_super_ddf(struct supertype *st, struct supertype *tst,
 			memcpy(dl1->spare, dl2->spare, first->conf_rec_len*512);
 		}
 		for (vd = 0 ; vd < first->max_part ; vd++) {
-			if (!dl2->vlist[vd]) {
-				dl1->vlist[vd] = NULL;
+			dl1->vlist[vd] = NULL;
+			if (!dl2->vlist[vd])
 				continue;
-			}
-			for (vl1 = first->conflist; vl1; vl1 = vl1->next) {
+			for (vl1 = first->conflist; vl1; vl1 = vl1->next)
 				if (!memcmp(vl1->conf.guid,
 					    dl2->vlist[vd]->conf.guid,
 					    DDF_GUID_LEN))
 					break;
-				dl1->vlist[vd] = vl1;
-			}
+			dl1->vlist[vd] = vl1;
 		}
 		first->dlist = dl1;
 		dprintf("added disk %d: %08x\n", dl1->pdnum,
