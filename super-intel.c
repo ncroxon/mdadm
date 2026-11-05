@@ -1253,6 +1253,16 @@ static int load_bbm_log(struct intel_super *super)
 	if (bbm_log_size) {
 		struct bbm_log *log = (void *)mpb +
 			__le32_to_cpu(mpb->mpb_size) - bbm_log_size;
+		size_t used = sizeof(struct imsm_super) -
+			sizeof(struct imsm_disk) +
+			mpb->num_disks * sizeof(struct imsm_disk);
+		int i;
+
+		/* the log must not overlap the disk table and raid devices */
+		for (i = 0; i < mpb->num_raid_devs; i++)
+			used += sizeof_imsm_dev(__get_imsm_dev(mpb, i), 0);
+		if (used + bbm_log_size > __le32_to_cpu(mpb->mpb_size))
+			return 2;
 
 		memcpy(super->bbm_log, log, bbm_log_size);
 	} else {
@@ -6372,6 +6382,37 @@ static int write_super_imsm_spares(struct intel_super *super, int doclose)
 	return 0;
 }
 
+/* number of bytes write_super_imsm() needs to lay out the mpb in super->buf */
+static size_t imsm_mpb_write_size(struct intel_super *super)
+{
+	size_t base = sizeof(struct imsm_super) - sizeof(struct imsm_disk);
+	size_t size;
+	int num_disks = 0;
+	int max_index = -1;
+	struct dl *d;
+	int i;
+
+	for (d = super->disks; d; d = d->next) {
+		if (d->index == -1)
+			continue;
+		num_disks++;
+		if (d->index > max_index)
+			max_index = d->index;
+	}
+	for (d = super->missing; d; d = d->next) {
+		num_disks++;
+		if (d->index > max_index)
+			max_index = d->index;
+	}
+
+	size = base + num_disks * sizeof(struct imsm_disk);
+	for (i = 0; i < super->anchor->num_raid_devs; i++)
+		size += sizeof_imsm_dev(get_imsm_dev(super, i), 0);
+	size += get_imsm_bbm_log_size(super->bbm_log);
+
+	return max(size, base + (max_index + 1) * sizeof(struct imsm_disk));
+}
+
 static int write_super_imsm(struct supertype *st, int doclose)
 {
 	struct intel_super *super = st->sb;
@@ -6386,6 +6427,11 @@ static int write_super_imsm(struct supertype *st, int doclose)
 	int num_disks = 0;
 	int clear_migration_record = 1;
 	__u32 bbm_log_size;
+
+	if (super->len && imsm_mpb_write_size(super) > super->len) {
+		pr_err("imsm metadata does not fit in its buffer, not writing\n");
+		return 1;
+	}
 
 	/* 'generation' is incremented everytime the metadata is written */
 	generation = __le32_to_cpu(mpb->generation_num);
