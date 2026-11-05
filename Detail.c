@@ -29,6 +29,7 @@
 
 #include	<ctype.h>
 #include	<dirent.h>
+#include	<limits.h>
 
 static int cmpstringp(const void *p1, const void *p2)
 {
@@ -109,6 +110,7 @@ int Detail(char *dev, struct context *c)
 	struct supertype *st = NULL;
 	char *subarray = NULL;
 	int max_disks = MD_SB_DISKS; /* just a default */
+	int disks_cnt;
 	struct mdinfo *info = NULL;
 	struct mdinfo *sra = NULL;
 	struct mdinfo *subdev;
@@ -339,8 +341,33 @@ int Detail(char *dev, struct context *c)
 		goto out;
 	}
 
-	disks = xmalloc(max_disks * 2 * sizeof(mdu_disk_info_t));
-	for (d = 0; d < max_disks * 2; d++) {
+	if (array.raid_disks < 0 || array.raid_disks > INT_MAX / 4) {
+		pr_err("%s reports an invalid number of devices: %d\n",
+		       dev, array.raid_disks);
+		rv = 1;
+		goto out;
+	}
+
+	/* disks[] has a pair of entries (device and replacement) for each
+	 * slot, followed by the remaining devices.  raid_disks comes from
+	 * the superblock and may exceed max_devs, so make room for every
+	 * slot and, for an inactive array, for every member.
+	 */
+	disks_cnt = max_disks;
+	if (array.raid_disks > disks_cnt)
+		disks_cnt = array.raid_disks;
+	if (inactive) {
+		struct mdinfo *mdi;
+		int ndevs = 0;
+
+		for (mdi = sra->devs; mdi; mdi = mdi->next)
+			ndevs++;
+		if (array.raid_disks + ndevs > disks_cnt)
+			disks_cnt = array.raid_disks + ndevs;
+	}
+
+	disks = xmalloc((size_t)disks_cnt * 2 * sizeof(mdu_disk_info_t));
+	for (d = 0; d < disks_cnt * 2; d++) {
 		disks[d].state = (1 << MD_DISK_REMOVED);
 		disks[d].major = disks[d].minor = 0;
 		disks[d].number = -1;
@@ -375,7 +402,7 @@ int Detail(char *dev, struct context *c)
 			 (1 << MD_DISK_REMOVED) &&
 			 !(disk.state & (1 << MD_DISK_JOURNAL)))
 			disks[disk.raid_disk * 2 + 1] = disk;
-		else if (next < max_disks * 2)
+		else if (next < disks_cnt * 2)
 			disks[next++] = disk;
 	}
 
@@ -535,7 +562,7 @@ int Detail(char *dev, struct context *c)
 			} else {
 				arrayst = "active";
 				if (array.state & (1<<MD_SB_CLUSTERED)) {
-					for (d = 0; d < max_disks * 2; d++) {
+					for (d = 0; d < disks_cnt * 2; d++) {
 						char *dv;
 						mdu_disk_info_t disk = disks[d];
 
@@ -730,7 +757,7 @@ int Detail(char *dev, struct context *c)
 	if (c->no_devices)
 		goto skip_devices_state;
 
-	for (d = 0; d < max_disks * 2; d++) {
+	for (d = 0; d < disks_cnt * 2; d++) {
 		char *dv;
 		mdu_disk_info_t disk = disks[d];
 
