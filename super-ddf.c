@@ -1333,6 +1333,12 @@ static int load_ddf_local(int fd, struct ddf_super *super,
 			/* Must be vendor-unique - I cannot handle those */
 			continue;
 
+		if (vnum >= (int)super->max_part) {
+			pr_err("ddf: more VD configuration records than max_partitions (%u)\n",
+			       super->max_part);
+			return 1;
+		}
+
 		for (vcl = super->conflist; vcl; vcl = vcl->next) {
 			if (memcmp(vcl->conf.guid,
 				   vd->guid, DDF_GUID_LEN) == 0)
@@ -4903,6 +4909,11 @@ static void ddf_update_vlist(struct ddf_super *ddf, struct dl *dl)
 					      &conf, &ibvd);
 		if (dn == DDF_NOTFOUND)
 			continue;
+		if (vn >= ddf->max_part) {
+			pr_err("too many VDs for dev %08x, max is %u\n",
+			       be32_to_cpu(dl->disk.refnum), ddf->max_part);
+			break;
+		}
 		dprintf("dev %d/%08x has %s (sec=%u) at %d\n",
 			dl->pdnum,
 			be32_to_cpu(dl->disk.refnum),
