@@ -12709,7 +12709,7 @@ static int imsm_manage_reshape(
 	int chunk; /* [bytes] */
 	struct migr_record *migr_rec;
 	char *buf = NULL;
-	unsigned int buf_size; /* [bytes] */
+	unsigned long long buf_size; /* [bytes] */
 	unsigned long long max_position; /* array size [bytes] */
 	unsigned long long next_step; /* [blocks]/[bytes] */
 	unsigned long long old_data_stripe_length;
@@ -12778,11 +12778,16 @@ static int imsm_manage_reshape(
 	}
 
 	/* size for data */
-	buf_size = __le32_to_cpu(migr_rec->blocks_per_unit) * 512;
-	/* extend  buffer size for parity disk */
-	buf_size += __le32_to_cpu(migr_rec->dest_depth_per_unit) * 512;
-	/* add space for stripe alignment */
-	buf_size += old_data_stripe_length;
+	buf_size = (unsigned long long)__le32_to_cpu(migr_rec->blocks_per_unit) * 512;
+	/* add space for stripe alignment at both ends of the unit */
+	buf_size += 2 * old_data_stripe_length;
+	/* save_stripes() reads parity chunks past the last stripe */
+	buf_size += (unsigned long long)map_src->num_members * chunk;
+	/* save_backup_imsm() takes the unit length as int */
+	if (buf_size > INT_MAX) {
+		pr_err("imsm: Invalid migration unit size in migration record\n");
+		goto abort;
+	}
 	if (posix_memalign((void **)&buf, MAX_SECTOR_SIZE, buf_size)) {
 		dprintf("imsm: Cannot allocate checkpoint buffer\n");
 		goto abort;
@@ -12841,6 +12846,12 @@ static int imsm_manage_reshape(
 				start, start_src, copy_length,
 				start_buf_shift, next_step_filler);
 
+			if (copy_length + next_step_filler + start_buf_shift +
+			    (unsigned long long)map_src->num_members * chunk >
+			    buf_size) {
+				pr_err("imsm: Migration unit does not fit in checkpoint buffer\n");
+				goto abort;
+			}
 			if (save_stripes(fds, offsets, map_src->num_members,
 					 chunk, map_src->raid_level,
 					 source_layout, 0, NULL, start_src,
