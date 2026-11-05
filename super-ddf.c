@@ -848,7 +848,8 @@ static int load_ddf_header(int fd, unsigned long long lba,
 }
 
 static void *load_section(int fd, struct ddf_super *super, void *buf,
-			  be32 offset_be, be32 len_be, int check)
+			  size_t buf_len, be32 offset_be, be32 len_be,
+			  int check)
 {
 	unsigned long long offset = be32_to_cpu(offset_be);
 	unsigned long long len = be32_to_cpu(len_be);
@@ -861,6 +862,12 @@ static void *load_section(int fd, struct ddf_super *super, void *buf,
 
 	if (len > 1024)
 		return NULL;
+	/*
+	 * Pre-allocated buffers hold a fixed-size structure; never read
+	 * more than fits, whatever the header claims.
+	 */
+	if (buf && (len << 9) > buf_len)
+		len = buf_len >> 9;
 	if (!buf && posix_memalign(&buf, 512, len<<9) != 0)
 		buf = NULL;
 
@@ -1104,16 +1111,17 @@ static int load_ddf_global(int fd, struct ddf_super *super, char *devname)
 {
 	void *ok;
 	ok = load_section(fd, super, &super->controller,
+			  sizeof(super->controller),
 			  super->active->controller_section_offset,
 			  super->active->controller_section_length,
 			  0);
-	super->phys = load_section(fd, super, NULL,
+	super->phys = load_section(fd, super, NULL, 0,
 				   super->active->phys_section_offset,
 				   super->active->phys_section_length,
 				   1);
 	super->pdsize = be32_to_cpu(super->active->phys_section_length) * 512;
 
-	super->virt = load_section(fd, super, NULL,
+	super->virt = load_section(fd, super, NULL, 0,
 				   super->active->virt_section_offset,
 				   super->active->virt_section_length,
 				   1);
@@ -1222,10 +1230,14 @@ static int load_ddf_local(int fd, struct ddf_super *super,
 		return 1;
 	}
 
-	load_section(fd, super, &dl->disk,
-		     super->active->data_section_offset,
-		     super->active->data_section_length,
-		     0);
+	if (!load_section(fd, super, &dl->disk, sizeof(dl->disk),
+			  super->active->data_section_offset,
+			  super->active->data_section_length,
+			  0)) {
+		pr_err("could not load physical disk data section\n");
+		free(dl);
+		return 1;
+	}
 	dl->devname = devname ? xstrdup(devname) : NULL;
 
 	if (fstat(fd, &stb) != 0) {
@@ -1270,20 +1282,33 @@ static int load_ddf_local(int fd, struct ddf_super *super,
 	 * the conflist
 	 */
 
-	conf = load_section(fd, super, super->conf,
+	/*
+	 * The configuration section length may differ between container
+	 * members, so always read it into a buffer of its own size.
+	 * __write_ddf_structure() later reuses super->conf to write
+	 * max_part + 1 records, so the section must be able to hold them.
+	 */
+	conf = load_section(fd, super, NULL, 0,
 			    super->active->config_section_offset,
 			    super->active->config_section_length,
 			    0);
-	super->conf = conf;
+	if (!conf) {
+		pr_err("ddf: could not load configuration section\n");
+		return 1;
+	}
 	vnum = 0;
 	unsigned int sec_len =
 		be32_to_cpu(super->active->config_section_length);
 
-	if (super->conf_rec_len == 0 || super->conf_rec_len > sec_len) {
+	if (super->conf_rec_len == 0 ||
+	    (unsigned long long)super->conf_rec_len * (super->max_part + 1) >
+	    sec_len) {
 		pr_err("ddf: Invalid configuration record length in metadata\n");
 		free(conf);
 		return 1;
 	}
+	free(super->conf);
+	super->conf = conf;
 
 	for (confsec = 0;
 	    confsec + super->conf_rec_len <= sec_len;
