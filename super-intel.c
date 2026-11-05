@@ -1179,7 +1179,42 @@ static int clear_badblock(struct bbm_log *log, const __u8 idx, const unsigned
 	return 1;
 }
 
-/* allocate and load BBM log from metadata */
+/* validate the on-disk BBM log header before anything walks its entries */
+static int validate_bbm_log(struct imsm_super *mpb)
+{
+	__u32 mpb_size = __le32_to_cpu(mpb->mpb_size);
+	__u32 bbm_log_size = __le32_to_cpu(mpb->bbm_log_size);
+	struct bbm_log *log;
+	__u32 entry_count;
+
+	if (!bbm_log_size)
+		return 0;
+
+	if (bbm_log_size < sizeof(log->signature) + sizeof(log->entry_count))
+		return 1;
+
+	/* the log is stored at the end of the mpb, after the fixed header */
+	if (bbm_log_size > mpb_size -
+	    (sizeof(struct imsm_super) - sizeof(struct imsm_disk)))
+		return 1;
+
+	log = (void *)mpb + mpb_size - bbm_log_size;
+	entry_count = __le32_to_cpu(log->entry_count);
+	if ((__le32_to_cpu(log->signature) != BBM_LOG_SIGNATURE) ||
+	    (entry_count > BBM_LOG_MAX_ENTRIES))
+		return 1;
+
+	if (bbm_log_size !=
+	    sizeof(log->signature) + sizeof(log->entry_count) +
+	    entry_count * sizeof(struct bbm_log_entry))
+		return 1;
+
+	return 0;
+}
+
+/* allocate and load BBM log from metadata
+ * the log header must have been checked with validate_bbm_log()
+ */
 static int load_bbm_log(struct intel_super *super)
 {
 	struct imsm_super *mpb = super->anchor;
@@ -1192,22 +1227,6 @@ static int load_bbm_log(struct intel_super *super)
 	if (bbm_log_size) {
 		struct bbm_log *log = (void *)mpb +
 			__le32_to_cpu(mpb->mpb_size) - bbm_log_size;
-
-		__u32 entry_count;
-
-		if (bbm_log_size < sizeof(log->signature) +
-		    sizeof(log->entry_count))
-			return 2;
-
-		entry_count = __le32_to_cpu(log->entry_count);
-		if ((__le32_to_cpu(log->signature) != BBM_LOG_SIGNATURE) ||
-		    (entry_count > BBM_LOG_MAX_ENTRIES))
-			return 3;
-
-		if (bbm_log_size !=
-		    sizeof(log->signature) + sizeof(log->entry_count) +
-		    entry_count * sizeof(struct bbm_log_entry))
-			return 4;
 
 		memcpy(super->bbm_log, log, bbm_log_size);
 	} else {
@@ -4747,6 +4766,12 @@ load_and_parse_mpb(int fd, struct intel_super *super, char *devname, int keep_fd
 	err = load_imsm_mpb(fd, super, devname);
 	if (err)
 		return err;
+	if (validate_bbm_log(super->anchor)) {
+		if (devname)
+			pr_err("Invalid bad block log in IMSM metadata on %s\n",
+			       devname);
+		return 2;
+	}
 	if (super->sector_size == 4096)
 		convert_from_4k(super);
 	err = load_imsm_disk(fd, super, devname, keep_fd);
