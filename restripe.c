@@ -26,6 +26,7 @@
 #include "xmalloc.h"
 
 #include <stdint.h>
+#include <limits.h>
 
 /* To restripe, we read from old geometry to a buffer, and
  * read from buffer to new geometry.
@@ -717,12 +718,23 @@ int restore_stripes(int *dest, unsigned long long *offsets,
 		    char *src_buf)
 {
 	char *stripe_buf;
-	char **stripes = xmalloc(raid_disks * sizeof(char*));
-	char **blocks = xmalloc(raid_disks * sizeof(char*));
+	char **stripes;
+	char **blocks;
 	int i;
 	int rv;
 
 	int data_disks = raid_disks - (level == 0 ? 0 : level <= 5 ? 1 : 2);
+
+	/* Geometry may come from on-disk metadata, so make sure the
+	 * stripe buffer size cannot overflow and that every stripe
+	 * makes progress.
+	 */
+	if (raid_disks <= 0 || data_disks <= 0 || chunk_size <= 0 ||
+	    raid_disks > INT_MAX / chunk_size)
+		return -2;
+
+	stripes = xmalloc(raid_disks * sizeof(char*));
+	blocks = xmalloc(raid_disks * sizeof(char*));
 
 	if (posix_memalign((void**)&stripe_buf, 4096, raid_disks * chunk_size))
 		stripe_buf = NULL;
