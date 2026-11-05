@@ -1584,6 +1584,7 @@ extern bool conf_get_imsm_disable_orom(void);
 extern char *conf_line(FILE *file);
 extern char *conf_word(FILE *file, int allow_key);
 extern void print_quoted(char *str);
+extern bool is_conf_word_safe(const char *str);
 extern int use_udev(void);
 extern void print_escape(char *str);
 extern unsigned long GCD(unsigned long a, unsigned long b);

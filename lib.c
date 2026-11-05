@@ -398,6 +398,30 @@ char *conf_word(FILE *file, int allow_key)
 	return word;
 }
 
+/**
+ * is_conf_word_safe() - Check if a string can be printed as one config word.
+ * @str: NUL terminated string, typically a name taken from metadata.
+ *
+ * Names stored in metadata are untrusted.  When such a name is printed
+ * into an mdadm.conf ARRAY line (e.g. by --examine --scan), whitespace or
+ * quotes would split it into several words and a newline would start a
+ * new configuration line.
+ *
+ * Return: true if @str has no whitespace, quote or control character.
+ */
+bool is_conf_word_safe(const char *str)
+{
+	for (; *str; str++) {
+		unsigned char c = *str;
+
+		if (c == '"' || c == '\'')
+			return false;
+		if (c < 0x80 && !isgraph(c))
+			return false;
+	}
+	return true;
+}
+
 void print_quoted(char *str)
 {
 	/* Printf the string with surrounding quotes

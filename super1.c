@@ -502,15 +502,23 @@ static void brief_examine_super1(struct supertype *st, int verbose)
 	struct mdp_superblock_1 *sb = st->sb;
 	int i;
 	unsigned long long sb_offset;
+	char name[sizeof(sb->set_name) + 1];
 	char *nm;
 	char *c = map_num(pers, __le32_to_cpu(sb->level));
 
-	nm = strchr(sb->set_name, ':');
+	/* set_name need not be NUL terminated */
+	memcpy(name, sb->set_name, sizeof(sb->set_name));
+	name[sizeof(sb->set_name)] = '\0';
+
+	nm = strchr(name, ':');
 	if (nm)
 		nm++;
-	else if (sb->set_name[0])
-		nm = sb->set_name;
+	else if (name[0])
+		nm = name;
 	else
+		nm = NULL;
+	/* Don't let the name break the ARRAY line into other config words */
+	if (nm && !is_conf_word_safe(nm))
 		nm = NULL;
 
 	printf("ARRAY ");
