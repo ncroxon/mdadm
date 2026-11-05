@@ -853,8 +853,15 @@ static int add_to_super0(struct supertype *st, mdu_disk_info_t *dinfo,
 			 int fd, char *devname, unsigned long long data_offset)
 {
 	mdp_super_t *sb = st->sb;
-	mdp_disk_t *dk = &sb->disks[dinfo->number];
+	mdp_disk_t *dk;
 	struct devinfo *di, **dip;
+
+	if (dinfo->number < 0 || dinfo->number >= MD_SB_DISKS) {
+		pr_err("%s: device number %d is beyond what 0.90 metadata can hold\n",
+		       devname ? devname : "device", dinfo->number);
+		return 1;
+	}
+	dk = &sb->disks[dinfo->number];
 
 	dk->number = dinfo->number;
 	dk->major = dinfo->major;

@@ -1617,9 +1617,16 @@ static int add_to_super1(struct supertype *st, mdu_disk_info_t *dk,
 			 int fd, char *devname, unsigned long long data_offset)
 {
 	struct mdp_superblock_1 *sb = st->sb;
-	__u16 *rp = sb->dev_roles + dk->number;
+	__u16 *rp;
 	struct devinfo *di, **dip;
 	int dk_state;
+
+	if (dk->number < 0 || dk->number >= MAX_DEVS) {
+		pr_err("%s: device number %d is beyond what 1.x metadata can hold\n",
+		       devname ? devname : "device", dk->number);
+		return 1;
+	}
+	rp = sb->dev_roles + dk->number;
 
 	dk_state = dk->state & ~(1<<MD_DISK_FAILFAST);
 	if ((dk_state & (1<<MD_DISK_ACTIVE)) &&
