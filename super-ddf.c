@@ -1346,6 +1346,17 @@ static int load_ddf_local(int fd, struct ddf_super *super,
 		}
 
 		if (vcl) {
+			/*
+			 * other_bvds[] was sized from the first record's
+			 * sec_elmnt_count; a record that disagrees with it
+			 * must not replace vcl->conf or be added as a BVD.
+			 */
+			if (vd->sec_elmnt_count != vcl->conf.sec_elmnt_count) {
+				pr_err("ddf: ignoring VD config record with sec_elmnt_count %u, expected %u\n",
+				       vd->sec_elmnt_count,
+				       vcl->conf.sec_elmnt_count);
+				continue;
+			}
 			dl->vlist[vnum++] = vcl;
 			if (vcl->other_bvds != NULL &&
 			    vcl->conf.sec_elmnt_seq != vd->sec_elmnt_seq) {
