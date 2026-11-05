@@ -1217,8 +1217,12 @@ static int load_ddf_local(int fd, struct ddf_super *super,
 	unsigned int i;
 	unsigned int confsec;
 	int vnum;
+	unsigned int vcnum;
 	unsigned int max_virt_disks =
-		be16_to_cpu(super->active->max_vd_entries);
+		ddf_safe_entry_count(super->vdsize,
+				     offsetof(struct virtual_disk, entries),
+				     sizeof(super->virt->entries[0]),
+				     be16_to_cpu(super->active->max_vd_entries));
 	unsigned int max_pdes;
 	unsigned long long dsize;
 
@@ -1333,6 +1337,16 @@ static int load_ddf_local(int fd, struct ddf_super *super,
 			/* Must be vendor-unique - I cannot handle those */
 			continue;
 
+		for (vcnum = 0; vcnum < max_virt_disks; vcnum++)
+			if (memcmp(super->virt->entries[vcnum].guid,
+				   vd->guid, DDF_GUID_LEN) == 0)
+				break;
+		if (vcnum == max_virt_disks) {
+			/* No virtual disk entry, the record is unusable */
+			dprintf("ignoring VD config record without virtual disk entry\n");
+			continue;
+		}
+
 		if (vnum >= (int)super->max_part) {
 			pr_err("ddf: more VD configuration records than max_partitions (%u)\n",
 			       super->max_part);
@@ -1385,12 +1399,7 @@ static int load_ddf_local(int fd, struct ddf_super *super,
 			dl->vlist[vnum++] = vcl;
 		}
 		memcpy(&vcl->conf, vd, super->conf_rec_len*512);
-		for (i=0; i < max_virt_disks ; i++)
-			if (memcmp(super->virt->entries[i].guid,
-				   vcl->conf.guid, DDF_GUID_LEN)==0)
-				break;
-		if (i < max_virt_disks)
-			vcl->vcnum = i;
+		vcl->vcnum = vcnum;
 	}
 
 	return 0;
@@ -4209,7 +4218,10 @@ static int compare_super_ddf(struct supertype *st, struct supertype *tst,
 	 * But the new disk may contain additional local data.
 	 * Add it to the super block.
 	 */
-	max_vds = be16_to_cpu(first->active->max_vd_entries);
+	max_vds = ddf_safe_entry_count(first->vdsize,
+				       offsetof(struct virtual_disk, entries),
+				       sizeof(first->virt->entries[0]),
+				       be16_to_cpu(first->active->max_vd_entries));
 	max_pds = be16_to_cpu(first->phys->max_pdes);
 	for (vl2 = second->conflist; vl2; vl2 = vl2->next) {
 		for (vl1 = first->conflist; vl1; vl1 = vl1->next)
@@ -4228,6 +4240,15 @@ static int compare_super_ddf(struct supertype *st, struct supertype *tst,
 			continue;
 		}
 
+		for (vd = 0; vd < max_vds; vd++)
+			if (!memcmp(first->virt->entries[vd].guid,
+				    vl2->conf.guid, DDF_GUID_LEN))
+				break;
+		if (vd == max_vds) {
+			dprintf("no virtual disk entry for VD config, skipping\n");
+			continue;
+		}
+
 		if (posix_memalign((void **)&vl1, 512,
 				   (first->conf_rec_len*512 +
 				    offsetof(struct vcl, conf))) != 0) {
@@ -4243,10 +4264,6 @@ static int compare_super_ddf(struct supertype *st, struct supertype *tst,
 			free(vl1);
 			return 3;
 		}
-		for (vd = 0; vd < max_vds; vd++)
-			if (!memcmp(first->virt->entries[vd].guid,
-				    vl1->conf.guid, DDF_GUID_LEN))
-				break;
 		vl1->vcnum = vd;
 		dprintf("added config for VD %u\n", vl1->vcnum);
 		first->conflist = vl1;
