@@ -617,8 +617,6 @@ static int update_super0(struct supertype *st, struct mdinfo *info,
 		break;
 	case UOPT_SPEC_ASSEMBLE: {
 		int d = info->disk.number;
-		int wonly = sb->disks[d].state & (1<<MD_DISK_WRITEMOSTLY);
-		int failfast = sb->disks[d].state & (1<<MD_DISK_FAILFAST);
 		int mask = (1<<MD_DISK_WRITEMOSTLY)|(1<<MD_DISK_FAILFAST);
 		int add = 0;
 		if (sb->minor_version >= 91)
@@ -626,8 +624,13 @@ static int update_super0(struct supertype *st, struct mdinfo *info,
 			 * being marked 'sync'
 			 */
 			add = (1<<MD_DISK_SYNC);
-		if (((sb->disks[d].state & ~mask) | add) !=
+		/* The device number comes from the on-disk superblock */
+		if (d >= 0 && d < MD_SB_DISKS &&
+		    ((sb->disks[d].state & ~mask) | add) !=
 		    (unsigned)info->disk.state) {
+			int wonly = sb->disks[d].state & (1<<MD_DISK_WRITEMOSTLY);
+			int failfast = sb->disks[d].state & (1<<MD_DISK_FAILFAST);
+
 			sb->disks[d].state = info->disk.state | wonly |failfast;
 			rv = 1;
 		}

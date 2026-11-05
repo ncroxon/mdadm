@@ -1155,7 +1155,10 @@ static int update_super1(struct supertype *st, struct mdinfo *info,
 			want = MD_DISK_ROLE_JOURNAL;
 		else
 			want = MD_DISK_ROLE_SPARE;
-		if (sb->dev_roles[d] != __cpu_to_le16(want)) {
+		/* The device number comes from the on-disk superblock */
+		if (d >= 0 && d < MAX_DEVS &&
+		    (unsigned int)d < __le32_to_cpu(sb->max_dev) &&
+		    sb->dev_roles[d] != __cpu_to_le16(want)) {
 			sb->dev_roles[d] = __cpu_to_le16(want);
 			rv = 1;
 		}
